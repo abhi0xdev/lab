@@ -1,0 +1,62 @@
+GIT Commands:
+
+
+Git Clone is used to create a copy of Repo on local system​
+
+$ git clone​
+
+Git Fetch is used to only fetch the metadata/new branch changes but does not bring any remote code changes to local changes​
+
+$ git fetch​
+
+Git Pull is used to fetch code changes from remote branch and merge it with local code​
+
+$ git pull ​
+
+Git Stash is used to save local changes in a backup directory​
+(It is used to temporarily store local uncommitted changes so you can switch branches or pull new changes without committing incomplete work.)
+
+$ git stash ​
+
+$ git stash apply
+
+Apply and remove stash
+
+$ git stash pop​
+
+Git checkout is used to change your current local branch to other branch ​
+
+$ git checkout <branch name>​
+
+Example: git checkout feature/testrepo ​
+
+Git merge is used to merge local code changes with remote branch changes all together​
+
+$ git merge​
+
+Git rebase is used to merge local code changes with remote branch changes one by one
+(It is used to move or replay local commits on top of the latest commits from another branch. This results in a linear commit history compared to merge, which creates an extra merge commit.)​
+
+$ git rebase -i <branch name>​
+
+Example: git rebase -i origin/master and then git add filename and then git push –f (:x to save any file during rebase)​
+
+Git add is used to add change to a commit​
+
+$ git add <filename1....filename2>​
+
+Example: git add test1.java test2.java​
+
+$ git add *​
+
+Git commit –m "message" is used to pass a commit message​
+
+Example: $ git commit –m  "This is the first commit in this branch"​
+
+Git squash is used to merge multiple commits into single commit​
+
+$ git squash​
+
+Git push is used to push local changes to remote branch​
+
+$ git push​
