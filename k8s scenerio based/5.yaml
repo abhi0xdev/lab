@@ -1,0 +1,23 @@
+# monitoring team reports that prod dashboards aren't showing any traffic or metrics for nginx-based web servers but the application team insists everything is running fine.
+# what would you do as Devops engineer in this scenerio?
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: nginx-latest
+  labesl:
+    app: nginx
+    env: prod
+spec:
+  containers:
+    - name: nginx
+      image: nginx:latest
+
+---
+# app: nginx -- indentifies the app; marks the pod is running an Nginx web server
+
+# env: prod -- specifies the env; labels the pod as part of prod env
+
+# Then run command $ kubectl apply -f pod.yaml
+
+# if pod is showing promeutheus but metrics is not showing for original app then it needs to escalate to app team

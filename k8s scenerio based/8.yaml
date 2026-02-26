@@ -1,0 +1,23 @@
+# Your app must run db migration before app main container start that means if migration failed app should never start
+
+# so we will create pod deployment with initcontainers for migration script and containers if migration succeed for app
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: app-with-migration
+spec:
+  restartPolicy: Never
+
+  initContainers: 
+  - name: db-migration
+    image: busybox
+    command: [sh -c 'echo "Run DB migratio" && sleep 5 && exit 0']
+
+  containers:
+  - name: app  
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+
+# initcontainer (migration task) ----> Main container (main app)

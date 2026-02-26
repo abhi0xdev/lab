@@ -1,0 +1,22 @@
+# your application needs to run with guaranted min 250m CPU and 256Mi memory, but not exceed limit of 500m CPU & 512Mi memory
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: app-with-resources
+  labesl:
+    app: resource-demo
+spec:
+  containers:
+    - name: app
+      image: node:18
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256mi"
+        limits:
+          cpu: "500m"
+          memory: "512mi"
+
+      ports:
+        - containerPort: 3000

@@ -1,0 +1,20 @@
+# you have to run DB cleanup job every night at certain time but only in staging env and not in dev or prod how will you handle this?
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-cleanup
+  namespace: staging
+spec:
+  schedule: "0 2 * * *" # every night at 2 am
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: myapp-db-cleaner:latest
+            args: ["cleanup", "--staging"]
+          restartPolicy: OnFailure
+
+# use k8s cronjob resource and deploy it only in staging namespace

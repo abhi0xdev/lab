@@ -1,0 +1,13 @@
+# microservices wants to talk to two diff services (payment api and shipping api) each api requires different authetication and rate limiting
+
+# create an ambassador container to handle all outbound call and policies
+# your main app container only talks to localhost
+
+spec:
+  containers:
+# main application container
+    - name: payment-svc
+      image: <img for payment-svc>
+# ambassador container which acts as proxy betweem our app and external APIs
+    - name: log-processor
+      image: <img for log-processor>

@@ -1,0 +1,15 @@
+# your node.js app requires env var stored in ConfigMap named node-env-config. How will you inject these var into your pod?
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: node-app-pod
+  labels:
+    app: node-app
+spec:
+  containers:
+    - name: app
+      image: node:18
+      envFrom:
+        - configMapRef:
+            name: node-env-config

@@ -1,0 +1,12 @@
+# you have spring boot app that need to run as single container pod exposing port 8080 how would you define pod YAML?
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: spring-boot-app
+spec:
+  containers:
+  - name: spring-boot-container
+    image: spring-app:latest
+    ports:
+    - containerPort: 8080

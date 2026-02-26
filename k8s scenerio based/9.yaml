@@ -1,0 +1,33 @@
+# your app logs must be shipped to an external system in real time 
+# so your need to use sidecar container that will tail app logs and send to external system
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: app-with-logging
+spec:
+  restartPolicy: Never
+  volumes:
+  - name: app-logs
+    emptyDir: {}
+
+  containers:
+  - name: app
+    image: nginx:latest
+    command: ['# command to start nginx & write logs']
+    volumeMounts:
+    - name: app-logs
+      mountPath: /var/log
+      
+  - name: log-shipper
+    image: busybox
+    command: ['# command to tail log file & ship logs']
+    volumeMounts:
+    - name: app-logs
+      mountPath: /var/log
+
+# 1st container (main app) --> that app produces logs and we want to send those logs to an external system in real time without changing application itself
+# 2nd container (log shipper) --> this conatiner mounts the same shared folder so it can access /var/log/app.log
+# it continuosly follows (tails) the app's logs file and for each new line prints mssg simulationg shipping the log to an external system
+
+# with this setup our logs flow out of application without app needing to know everytning about logging system

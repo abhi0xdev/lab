@@ -1,0 +1,26 @@
+# Secure your application by not hardcoding sensitive data like db cred in pod YAML
+# Inject cred into pod securely using k8s secrets
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: postgress-client
+spec:
+  containers:
+    - name: postgress-db
+      image: postgress
+      env:
+        - name:
+          valueFrom: DB_PASSWORD
+            secretKeyRef:
+              name: db-secret
+              key: pasword
+
+---
+apiVersion: v1
+kind: secret
+metadata:
+  name: db-secret
+type: Opaque
+data:
+  password: cGfZc1dvmq=  #Base64 incoded value password

@@ -1,0 +1,56 @@
+# machine-learning pipeline is running with data-preprocessing pods and model-training pods but due to perfomance reason u want to run both pod in same node to minimize data transfer latency
+
+# so data-preprocessing pods are currently running in node but using Pod Affinity rule I will assign model-training pods on same node so both pod will run on same node
+
+#data-preprocessing yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-preprocess
+  labels:
+    app: ml-pipeline
+    role: preprocess
+spec:
+  containers:
+  - name: preprocess
+    image: my-preprocess-img:latest
+    command: ['sh', '-c','echo "Running data preprocessing"; sleep 30']
+  restartPolicy: Never
+
+# model-training pod yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: model-training
+  labels:
+    app: ml-pipeline
+    role: trainer
+spec:
+  restartPolicy: Never
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoreDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpression:
+            - key: role
+              operator: In
+              values:
+              - preprocess
+          topologyKey: "k8s.io/hostman"
+      - weight: 50
+        podAffinityTerm:
+          labelSelector:
+            matchExpression:
+              - key: role
+                operator: In
+                values:
+                - preprocess
+          topologyKey: "topology.k8s.io/zone"
+  containers:
+  - name: trainer
+    image: my-ml-trainer:latest
+    command: ['sh', '-c', 'echo "starting model training..."; sleep 30']

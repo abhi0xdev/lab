@@ -1,0 +1,20 @@
+# you want to expose specific field of pod like IP and pod name as env var so what features of k8s support this?
+# Ans--> In your deployment (on pod) define env var using "fieldRef" for exp to expose Pod name and IP
+
+apiVersion: v1
+kind: pod
+metadata:
+  name: demo-pod
+spec:
+  containers:
+    - name: demo-cont
+      image: nginx
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP

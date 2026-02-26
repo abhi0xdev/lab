@@ -1,0 +1,40 @@
+# e-comm app has payment svc container that process the payment order and u need seperate container to parse and send logs to elastic search and also both share the same volumen and scale as unit
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-with-logger
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payment-with-logger
+  template:
+    metadata:
+      labels:
+        app: payment-with-logger
+    spec:
+      volumnes:
+        - name: shared-logs
+          empyDir: {}
+      containers:
+        - name: payment-service
+          image: your-dockerfile/pay-svc:latest
+          ports:
+            - containerPorts: 8080
+          volumenMounts:
+            - name: shared-logs
+              mountPath: /var/log/payment
+        - name: log-processor
+          image: your-dockerfile/log-proc:latest
+          volumeMounts:
+            - name: shared-logs
+              mountPath: /var/logs/payment
+          env:
+            - name: ELASTICSEARCH_URL
+              value: "http://elasticsearch:9200"
+
+# 1st container (payment svc) --> which is our main app with conatiner port and mount path
+# 2nd container (log processor) --> which is read main app logs and mount the logs in the path and then send it to elasticsearch using env var
+
+# shared-logs volumes ensures that both container shared their logs data by keeping the container with isolated each other

@@ -1,0 +1,43 @@
+# you are deploying web frontend app but we dont multiple replicasets on same node due to high availability to avoid single point of failure if one node gets down
+# we used pod anti affinity rule --> dont schedule pods with same label together on same node or topology domain
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-fe
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-fe
+  template:
+    metadata:
+      labels:
+        app: web-fe
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoreDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - web-fe
+            topologyKey: "k8s.io/hostname"  # avoid same node
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - web-fe
+            topologyKey: "topology.k8s.io/zone"  # avoid same zone
+
+      containers:
+      - name: fe
+        image: my-web-fe:latest
+        ports:
+        - containerPort: 80
+
+
+# so this way we prevent a single node failure from taking down multiple replicas of our service
