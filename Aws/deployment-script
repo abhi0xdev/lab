@@ -1,0 +1,10 @@
+#!/bin/bash
+
+echo "Pull latest code"
+git pull origin main
+
+echo "Install dependencies"
+pip install -r requirements.txt
+
+echo "Restart service"
+sudo systemctl restart myapp

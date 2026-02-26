@@ -1,0 +1,84 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  buildConfiguration: 'Release'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+
+# 🔹 Stage 1: Build
+- stage: Build
+  displayName: Build Stage
+  jobs:
+  - job: BuildJob
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.10'
+
+    - script: |
+        pip install -r requirements.txt
+      displayName: Install dependencies
+
+    - script: |
+        echo "Running Build..."
+      displayName: Build Step
+
+# 🔹 Stage 2: Test
+- stage: Test
+  dependsOn: Build
+  jobs:
+  - job: TestJob
+    steps:
+    - script: |
+        pytest
+      displayName: Run Tests
+
+# 🔹 Stage 3: Deploy
+- stage: Deploy
+  dependsOn: Test
+  jobs:
+  - job: DeployJob
+    steps:
+    - script: |
+        echo "Deploying application..."
+      displayName: Deploy Step
+
+
+# 2. What This Pipeline Demonstrates (Important for Interview)
+
+CI trigger on main branch
+
+Multi-stage pipeline (Build → Test → Deploy)
+
+Dependency installation
+
+Test execution (pytest)
+
+Structured YAML (real-world practice)
+
+
+# 5. How to Explain This in Interview (Very Important)
+
+If interviewer asks:
+
+👉 “Explain your pipeline”
+
+You say:
+
+“I created a YAML-based multi-stage pipeline in Azure DevOps.”
+
+“It triggers on code push to main branch.”
+
+“First stage installs dependencies and builds.”
+
+“Second stage runs automated tests using pytest.”
+
+“Final stage deploys the application.”
+
+“I also used artifacts to pass build outputs between stages.”
