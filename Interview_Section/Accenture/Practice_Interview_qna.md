@@ -210,3 +210,109 @@ git push origin feature/new-feature
 
 A pipeline is passing but production has bugs. What is the issue?
 The issue is likely insufficient test coverage or missing real-world scenarios in tests. It works as a gap between CI validation and production behavior. It is used to highlight weaknesses in testing strategy. A limitation is that not all edge cases can be tested. In real scenarios, adding integration and performance tests improves reliability.
+
+---
+
+What happens when a Jenkins pipeline fails intermittently and how would you fix it?
+Intermittent pipeline failures are usually caused by flaky tests, unstable dependencies, or timing issues in parallel stages. I would start by analyzing build logs across multiple runs to identify patterns and isolate the failing stage. This works by distinguishing between consistent failures and random issues like network or resource contention. It is used to stabilize CI/CD pipelines and improve reliability. A limitation is that flaky issues are hard to reproduce locally. In real scenarios, adding retries, better logging, and isolating tests helps reduce such failures.
+
+A developer says their code works locally but fails in CI/CD. What would you check?
+I would compare the local and CI environments, including dependencies, environment variables, and runtime versions. I would check if the pipeline uses clean builds and whether required services like databases are properly mocked or available. This works by identifying environment drift between local and pipeline execution. It is used to ensure consistency in builds. A limitation is that CI environments may lack some local configurations. In practice, containerizing builds helps standardize environments.
+
+How would you design a secure CI/CD pipeline for production deployments?
+I would design the pipeline with stages for code validation, testing, security scanning, and controlled deployment with approval gates. I would integrate tools for SAST, DAST, and secrets scanning, and enforce RBAC for access control. This works by embedding security checks throughout the pipeline rather than only at the end. It is used to prevent vulnerabilities from reaching production. A limitation is increased pipeline execution time. In real scenarios, balancing security checks with developer productivity is important.
+
+Your Kubernetes pod is stuck in Pending state. What could be the reason?
+A pod in Pending state usually indicates insufficient resources, node selector mismatch, or scheduling constraints. I would check events using describe command to see if there are resource shortages or taints preventing scheduling. This works by analyzing Kubernetes scheduler decisions. It is used to diagnose deployment issues quickly. A limitation is that multiple factors can cause the same symptom. In real scenarios, cluster capacity planning is critical to avoid such issues.
+
+Write a Jenkinsfile that runs stages in parallel for testing.
+This pipeline defines parallel stages for running different test suites simultaneously. It works by splitting workloads to reduce execution time. It is used to speed up CI pipelines. A limitation is that parallel execution can complicate debugging. In practice, resource limits must be considered to avoid overloading agents.
+
+```groovy id="a9x2p1"
+pipeline {
+    agent any
+    stages {
+        stage('Parallel Tests') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh 'mvn test'
+                    }
+                }
+                stage('Integration Tests') {
+                    steps {
+                        sh 'mvn verify'
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+How do you handle secrets in Kubernetes securely?
+Secrets in Kubernetes are stored as objects and accessed by pods via environment variables or volumes. I would ensure they are encrypted at rest and restrict access using RBAC. This works by limiting exposure of sensitive data. It is used to protect credentials and keys. A limitation is that base64 encoding is not encryption by default. In real scenarios, integrating with external secret managers like Vault is preferred.
+
+A deployment succeeded but users report downtime. What went wrong?
+The deployment may have caused downtime due to lack of proper rollout strategy like rolling updates or readiness probes. I would check if new pods were ready before terminating old ones. This works by ensuring zero-downtime deployments. It is used to maintain service availability. A limitation is that misconfigured probes can still cause issues. In practice, blue-green or canary deployments improve reliability.
+
+Write an Ansible playbook to copy a file and restart a service.
+This playbook copies a configuration file and restarts the service if changes occur. It works by using handlers triggered only when changes are detected. It is used to ensure efficient and controlled updates. A limitation is that incorrect handlers can cause unnecessary restarts. In real scenarios, validating configs before restart is important.
+
+```yaml id="k2lm9q"
+- name: Deploy config and restart service
+  hosts: app
+  become: yes
+  tasks:
+    - name: Copy config file
+      copy:
+        src: app.conf
+        dest: /etc/app.conf
+      notify: restart app
+
+  handlers:
+    - name: restart app
+      service:
+        name: app
+        state: restarted
+```
+
+How would you debug a failing Helm deployment?
+I would check Helm release status and use helm logs and kubectl describe to identify issues. I would validate values.yaml and template rendering using helm template. This works by verifying both configuration and runtime behavior. It is used to troubleshoot deployment failures. A limitation is that template errors can be hard to trace. In real scenarios, using linting and dry runs helps catch issues early.
+
+Write a Bash script to monitor disk usage and alert if above threshold.
+This script checks disk usage and prints an alert if it exceeds a defined limit. It works by parsing system command output. It is used for basic monitoring automation. A limitation is that it does not send real alerts. In real scenarios, integration with monitoring tools is needed.
+
+```bash id="p4z7rt"
+#!/bin/bash
+THRESHOLD=80
+USAGE=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+
+if [ "$USAGE" -gt "$THRESHOLD" ]; then
+  echo "Disk usage is above threshold: $USAGE%"
+else
+  echo "Disk usage is normal: $USAGE%"
+fi
+```
+
+How do you ensure traceability between code, builds, and releases?
+I ensure traceability by linking commits to Jira tickets and tagging builds with version numbers. I integrate CI/CD pipelines to update ticket status automatically. This works by maintaining a clear mapping between changes and deployments. It is used for audit and compliance. A limitation is dependency on consistent developer practices. In real scenarios, enforcing commit message standards helps maintain traceability.
+
+A pipeline is secure but very slow. What would you optimize?
+I would analyze which security scans are time-consuming and move some to asynchronous or scheduled runs. I would parallelize scans and use incremental scanning where possible. This works by reducing blocking time in pipelines. It is used to balance security and speed. A limitation is that delayed scans may miss immediate issues. In real scenarios, critical scans should always remain blocking.
+
+Write a Python script to check if a URL is reachable.
+This script sends an HTTP request and checks the response status. It works by using a library like requests to validate connectivity. It is used for health checks and monitoring. A limitation is that it does not handle all network errors. In real scenarios, timeouts and retries should be added.
+
+```python id="z8n1qx"
+import requests
+
+try:
+    response = requests.get("https://example.com", timeout=5)
+    if response.status_code == 200:
+        print("URL is reachable")
+    else:
+        print(f"Received status: {response.status_code}")
+except Exception as e:
+    print(f"Error: {e}")
+```
