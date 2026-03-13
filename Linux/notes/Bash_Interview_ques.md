@@ -1,0 +1,61 @@
+What is Bash and why is it commonly used in DevOps environments?
+Bash is a command-line shell and scripting language used to automate tasks in Unix and Linux systems. It works by executing sequences of commands stored in script files, allowing system operations to be automated instead of executed manually. It is widely used in DevOps because it integrates directly with the operating system and can control processes, files, networking, and services. One limitation is that complex logic becomes difficult to maintain compared to higher-level languages like Python. In real environments, Bash scripts must include error handling and logging because silent failures can break automation pipelines.
+
+How do you make a Bash script executable and run it?
+A Bash script becomes executable by assigning execute permission using the chmod command, typically with chmod +x script.sh. The script works by using a shebang line such as #!/bin/bash that tells the system which interpreter should execute the script. Once executable, it can be run directly using ./script.sh or executed through the shell using bash script.sh. This method allows automation of repetitive system operations. One limitation is that scripts may fail if the interpreter path in the shebang line is incorrect. In real deployments, scripts should always be tested in the same environment where they will run.
+
+What is the purpose of the shebang line in a Bash script?
+The shebang line is the first line in a script that specifies which interpreter should execute the file. It works by instructing the operating system to run the script using the specified program, such as /bin/bash. This ensures that the correct shell environment executes the script regardless of the user's default shell. It is used to avoid compatibility issues between different shell interpreters. One limitation is that scripts can fail if the interpreter path is not present on the system. In production environments, using /usr/bin/env bash can improve portability across systems.
+
+How do variables work in Bash scripting?
+Variables in Bash are used to store values such as strings, numbers, or command outputs during script execution. They work by assigning values using the syntax variable=value and accessing them with the dollar symbol like $variable. They are used to make scripts dynamic and reusable by allowing data to change during execution. One limitation is that Bash variables are weakly typed and errors can occur if values are not handled carefully. In real-world scripts, quoting variables is considered a best practice to prevent issues caused by spaces or special characters.
+
+How do you pass arguments to a Bash script?
+Arguments are passed to a Bash script when it is executed from the command line, and they are accessed using positional variables like $1, $2, and $3. Internally, the shell assigns each argument to these variables so the script can process input dynamically. This mechanism allows scripts to perform different tasks depending on the input provided by the user. A limitation is that positional arguments become difficult to manage when there are many parameters. In production automation, scripts often use argument parsing techniques or tools like getopts for better maintainability.
+
+What is command substitution in Bash?
+Command substitution allows the output of a command to be captured and stored in a variable. It works by enclosing a command within $( ) so that the shell executes the command and replaces it with its output. This is used to dynamically fetch system information or command results during script execution. The limitation is that command substitution can introduce performance overhead if used excessively in loops. In real systems, administrators often cache results in variables instead of repeatedly running expensive commands.
+
+How do conditional statements work in Bash scripts?
+Conditional statements allow scripts to make decisions based on conditions such as file existence or variable values. They work using constructs like if, then, else, and test expressions within square brackets. This mechanism enables automation scripts to perform different actions depending on system states or user inputs. The limitation is that Bash condition syntax is strict and small mistakes can cause unexpected behavior. In production environments, conditions should always include proper error checks to prevent scripts from executing unsafe operations.
+
+What are loops in Bash scripting and why are they useful?
+Loops allow a script to execute a block of commands repeatedly until a condition is met or a list is exhausted. Bash supports loops such as for, while, and until to iterate through files, numbers, or command outputs. They are used in DevOps automation to process multiple servers, files, or tasks efficiently. The trade-off is that poorly written loops can cause performance issues or infinite execution. In real systems, safeguards such as iteration limits or exit conditions should be included to prevent runaway scripts.
+
+How would you handle errors in a Bash script?
+Error handling in Bash involves checking command exit statuses and responding appropriately when commands fail. Each command returns an exit code where zero indicates success and non-zero indicates failure, which can be checked using the special variable $?. This mechanism helps scripts detect failures and stop execution or trigger fallback actions. One limitation is that many scripts ignore exit codes, leading to silent failures in automation pipelines. In production environments, using set -e or explicit error checks ensures scripts terminate when critical commands fail.
+
+What is the purpose of set -e in Bash scripting?
+The set -e option instructs the shell to immediately exit the script if any command returns a non-zero exit status. It works by enforcing strict error handling so that the script does not continue executing after a failure. This is useful in DevOps automation where partial execution can cause inconsistent system states. A limitation is that it may terminate scripts even for expected non-zero exit codes unless handled properly. In production scripts, commands that may fail intentionally should be wrapped with conditional checks or error handling logic.
+
+How can Bash scripts be used in CI/CD pipelines?
+Bash scripts are often used in CI/CD pipelines to automate build steps, testing, deployment, and environment setup. They work by executing commands defined in pipeline stages to control application lifecycle tasks such as compiling code or deploying containers. This provides flexibility because Bash can interact with system tools, APIs, and cloud services. The limitation is that complex pipeline logic written in Bash can become difficult to maintain. In real DevOps workflows, Bash scripts are usually modularized and integrated with tools like Jenkins or GitHub Actions.
+
+How do you read input from users in a Bash script?
+User input can be read using the read command which waits for input from the terminal and assigns it to a variable. Internally, the shell pauses execution until the user provides the requested data. This allows scripts to interact with users during execution and customize behavior dynamically. The limitation is that interactive input is not suitable for automated environments. In production automation scripts, input values are usually provided through arguments or environment variables instead.
+
+How do you check if a file exists in Bash?
+File existence is checked using conditional test expressions such as -f for files or -d for directories. The shell evaluates these expressions within conditional statements to determine whether the specified path exists. This is commonly used in automation scripts to ensure required files or configurations are present before executing operations. A limitation is that file checks can still fail due to permission issues even if the file exists. In real systems, scripts should include both existence checks and proper permission validation.
+
+How do you log output in a Bash script for debugging or monitoring?
+Logging in Bash scripts is typically implemented by redirecting command outputs to log files using operators such as > or >>. Scripts can also use tools like tee to display output in the terminal while simultaneously saving it to a log file. This allows administrators to track script execution and diagnose issues later. The limitation is that large logs can quickly consume disk space if rotation policies are not applied. In production environments, log rotation tools such as logrotate are commonly used to manage script logs.
+
+How would you write a Bash script to monitor a service and restart it if it fails?
+A monitoring script would periodically check the service status using commands such as systemctl is-active or service status. The script works by evaluating the command output and restarting the service if the status indicates failure. This approach ensures that critical services recover automatically without manual intervention. The limitation is that simple restart loops may hide underlying application issues. In real environments, such scripts should also log failures and include alerting mechanisms for administrators.
+
+How do you schedule Bash scripts in Linux?
+Bash scripts are scheduled using cron jobs which allow tasks to run automatically at defined intervals. The cron daemon reads configuration entries from crontab files and executes the specified commands at scheduled times. This is widely used for routine operations such as backups, log cleanup, or monitoring tasks. One limitation is that cron jobs run in a minimal environment which may not include all expected variables. In production environments, scripts should explicitly define environment variables and absolute paths to avoid failures.
+
+How do you debug a failing Bash script?
+Debugging typically starts by enabling shell tracing using set -x which prints each command before it executes. This helps identify where the script fails and what values variables contain at runtime. Additional debugging methods include adding echo statements and checking exit codes of critical commands. The limitation is that tracing can produce large volumes of output that are difficult to analyze. In production automation, structured logging and proper error messages significantly improve troubleshooting efficiency.
+
+How do you prevent race conditions when running Bash scripts in parallel jobs?
+Race conditions occur when multiple scripts attempt to access or modify the same resource simultaneously. They can be prevented by using locking mechanisms such as lock files or tools like flock. This works by ensuring only one script instance can access a resource at a time. The limitation is that improper lock handling can cause deadlocks if locks are not released. In production systems, scripts should always clean up lock files and handle unexpected termination scenarios.
+
+How can Bash interact with APIs in DevOps workflows?
+Bash can interact with APIs using command-line tools like curl or wget to send HTTP requests and receive responses. These tools allow scripts to trigger deployments, fetch configuration data, or integrate with cloud services. This capability makes Bash useful for automation tasks that require communication with external systems. The limitation is that parsing complex JSON responses in Bash can be cumbersome. In real-world automation, tools like jq are commonly used alongside Bash to process structured API responses.
+
+How do you ensure Bash scripts are portable across different Linux distributions?
+Portability is achieved by using POSIX-compliant syntax and avoiding distribution-specific commands whenever possible. Scripts should reference interpreters using flexible paths such as /usr/bin/env and rely on widely available utilities. This ensures the script behaves consistently across different environments. One limitation is that some advanced Bash features may not be available in minimal shells. In production environments, scripts should be tested across target systems and dependencies should be documented clearly.
+
+---
