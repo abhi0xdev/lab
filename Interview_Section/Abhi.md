@@ -225,6 +225,7 @@ YAML YOU CAN SPEAK (SHORT VERSION)
 ---
 
 👉 Kubernetes Deployment:
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
