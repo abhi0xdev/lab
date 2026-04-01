@@ -214,6 +214,7 @@ YAML YOU CAN SPEAK (SHORT VERSION)
 
 👉 GitHub Actions snippet:
 
+```yaml
 - name: Build Docker Image
   run: docker build -t myapp:${{ github.sha }} .
 
@@ -222,10 +223,13 @@ YAML YOU CAN SPEAK (SHORT VERSION)
     aws ecr get-login-password | docker login ...
     docker push myapp:${{ github.sha }}
 
+```
+
 ---
 
 👉 Kubernetes Deployment:
 
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -239,7 +243,7 @@ spec:
         image: myapp:latest
         ports:
         - containerPort: 80
-
+```
 ---
 
 
