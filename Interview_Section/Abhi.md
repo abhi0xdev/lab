@@ -253,30 +253,15 @@ Production Issues -->
 
 Story 1 -->
 
-One interesting production issue I handled was when our Kubernetes pods kept getting OOMKilled, and honestly, it was quite confusing at the beginning.
+One production issue I handled was pods getting OOMKilled even though dashboards showed normal memory usage around 50–60%, with no alerts or logs.
 
-From our dashboards, everything looked completely normal. Memory usage was stable around 50–60%, there were no alerts, no spikes, and even application logs were clean. So initially, nothing indicated a memory problem.
+When we checked kubectl describe pod, we saw exit code 137, confirming OOMKilled. The confusion was because our dashboards were showing averaged metrics, which hid short-lived memory spikes.
 
-But the pods were still restarting randomly.
+We realized the application was briefly exceeding memory limits for milliseconds, and since Kubernetes enforces hard limits, it was killing the container immediately without logs.
 
-So we started digging deeper. I checked kubectl describe pod, and that’s where we saw exit code 137, which confirmed it was OOMKilled. That’s when we realized something was off—because the metrics were not matching the actual behavior.
+To fix it, we increased memory limits slightly, added buffer, and updated monitoring to track peak usage instead of averages. We also worked with developers to reduce memory spikes.
 
-Then we took a step back and thought about how we were looking at the data. Most of our dashboards were showing averaged metrics over time. That’s when it clicked—what if the issue is not sustained usage, but short-lived spikes?
-
-We investigated further and understood that these spikes were happening for very short durations—just milliseconds or seconds—so they were not getting captured due to Prometheus scrape intervals and the way dashboards smooth data.
-
-And since Kubernetes enforces strict memory limits, even a tiny spike beyond the limit can immediately kill the container, without giving the application any chance to log an error.
-
-To validate this, we started correlating pod restarts with container-level memory metrics like container_memory_working_set_bytes, and that gave us more clarity.
-
-To fix the issue, we slightly increased the memory limits and added some buffer so the application had room to handle spikes. Along with that, we improved our monitoring by focusing on peak values instead of averages and adjusting queries to better capture short-term behavior.
-
-We also worked with the development team to optimize parts of the application that were causing sudden memory usage during heavy processing.
-
-After these changes, the issue was resolved.
-
-This incident really changed how I look at production systems. I learned that most real-world failures don’t happen in steady state—they happen in short bursts or edge cases that you might not see unless you’re looking at the right metrics in the right way.
-
+After that, the issue was resolved, and it helped us improve how we monitor production systems
 ---
 
 ---
