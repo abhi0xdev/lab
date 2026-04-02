@@ -279,43 +279,9 @@ This incident really changed how I look at production systems. I learned that mo
 
 ---
 
-This is **excellent**—this is exactly the kind of real-world scenario that can **instantly upgrade your interview performance** if you present it correctly.
-
-Right now, your understanding is strong. What you need is to **convert this into a powerful, believable story** that shows:
-
-* real debugging
-* teamwork
-* technical depth
-* learning
-
 ---
 
-# 🔥 1. PERFECT INTERVIEW ANSWER (BASED ON YOUR INCIDENT)
-
-👉
-“Yes, I faced a similar issue in production where our Kubernetes pods were getting OOMKilled, but initially it was very confusing because there were no clear signs.
-
-From the monitoring dashboards, memory usage looked stable—around 50–60%. There were no alerts, no visible spikes, and application logs were also not showing any errors.
-
-We started debugging by checking `kubectl describe pod`, which confirmed the pods were being terminated with exit code 137, indicating OOMKilled.
-
-At first, it didn’t make sense because the metrics were showing safe memory usage. But then we realized that we were looking at averaged metrics over time, which was hiding short-lived memory spikes.
-
-These spikes were happening for very short durations—milliseconds or seconds—so they were not captured by Prometheus due to scrape intervals and dashboard averaging.
-
-Since Kubernetes enforces hard memory limits, even a brief spike beyond the limit caused the container to be killed immediately without any logs.
-
-To confirm this, we analyzed container-level memory metrics like `container_memory_working_set_bytes` and correlated them with pod restarts.
-
-To fix the issue, we increased memory limits slightly and added buffer headroom. We also improved observability by adjusting monitoring to capture peak usage using max-based queries and shorter time windows.
-
-Additionally, we discussed application-level optimizations with the development team to reduce memory spikes during heavy processing.
-
-This experience helped us understand that production issues are often caused by short-lived edge cases, not steady-state behavior, and monitoring needs to be designed accordingly.”
-
----
-
-# 🔥 2. IF INTERVIEWER ASKS: “WHAT WAS YOUR ROLE?”
+# 🔥 1. IF INTERVIEWER ASKS: “WHAT WAS YOUR ROLE?”
 
 👉
 “In this issue, I was mainly responsible for Kubernetes-level debugging and monitoring analysis.
@@ -326,7 +292,7 @@ I also helped improve monitoring queries and suggested increasing memory limits 
 
 ---
 
-# 🔥 3. IF THEY ASK: “HOW DID YOU CONFIRM SPIKES?”
+# 🔥 2. IF THEY ASK: “HOW DID YOU CONFIRM SPIKES?”
 
 👉
 “We couldn’t directly see spikes initially due to scrape intervals, but we inferred them by correlating pod restarts with workload patterns and analyzing peak memory metrics instead of averages.
@@ -335,7 +301,7 @@ After that, we adjusted monitoring queries using max-based functions and shorter
 
 ---
 
-# 🔥 4. STRONG TECHNICAL LINE (VERY IMPRESSIVE)
+# 🔥 3. STRONG TECHNICAL LINE (VERY IMPRESSIVE)
 
 Use this exact line 👇
 
@@ -344,7 +310,7 @@ Use this exact line 👇
 
 ---
 
-# 🔥 6. COMMON FOLLOW-UP QUESTIONS (BE READY)
+# 🔥 4. COMMON FOLLOW-UP QUESTIONS (BE READY)
 
 ---
 
@@ -376,7 +342,7 @@ Use this exact line 👇
 
 ---
 
-# 🔥 7. FINAL UPGRADE (THIS MAKES YOU STAND OUT)
+# 🔥 5. FINAL UPGRADE (THIS MAKES YOU STAND OUT)
 
 End your answer with this:
 
