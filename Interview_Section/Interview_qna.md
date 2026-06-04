@@ -1,5 +1,3 @@
----
-
 # 1. KUBERNETES
 
 **Q: What happens when you run `kubectl apply`? (asked constantly)**
