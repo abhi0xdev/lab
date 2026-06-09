@@ -1,3 +1,529 @@
+---
+
+# SECTION 3 — System Design / Scenario Questions
+
+Mid-level SRE design rounds aren't "design Google" — they're "design something real and reason about reliability." For each, I give you a **structured framework** to answer, not a memorized solution. Interviewers grade your *thinking process*, so always narrate your reasoning.
+
+## Scenario 1: "A service is returning 5xx errors. Walk me through debugging it."
+
+This is the most common SRE scenario. Structure your answer as a funnel — broad to narrow.
+
+**Framework:**
+1. **Scope the impact first.** "How many users? All requests or a percentage? When did it start? Did anything change — a deploy, a config push, a traffic spike?" (The "what changed" question solves most incidents.)
+2. **Check the dashboards.** Error rate, latency, traffic, saturation (golden signals). Is it a spike or a ramp? All endpoints or one?
+3. **Localize the layer.** Is it the LB/ingress, the service itself, or a downstream dependency? Check the `up` metric and per-service error rates.
+4. **Use traces.** Open a failing request's trace — which span is erroring? Is the time spent in the service or in a downstream call? This answers "is it us or a dependency?"
+5. **Read the logs.** From the trace, jump to logs for that trace ID. What's the actual error — DB timeout? OOM? 500 from a dependency?
+6. **Mitigate, then fix.** If it correlates with a recent deploy → roll back first. If it's a dependency → check that dependency's health, consider circuit-breaking.
+7. **Root cause + postmortem after.**
+
+**What to emphasize:** "My first question is always *what changed* — most 5xx spikes correlate with a deploy or config change. And I roll back before I deep-debug if users are actively impacted, because the error budget is burning while I investigate."
+
+## Scenario 2: "Design a highly available web service."
+
+**Framework — reason through each layer:**
+1. **Redundancy at every layer.** Multiple replicas across multiple availability zones; no single point of failure.
+2. **Load balancing.** LB in front, health checks to remove unhealthy instances automatically.
+3. **Stateless app tier.** Keep app servers stateless so any replica can serve any request; push state to a shared data store / cache.
+4. **Data tier HA.** Managed DB with multi-AZ failover (replica promotion); read replicas for scaling reads.
+5. **Autoscaling.** HPA on the app tier to handle load; keep headroom for failover capacity.
+6. **Graceful degradation.** Timeouts, retries with backoff, circuit breakers so a slow dependency doesn't cascade.
+7. **Observability + SLOs.** Define SLIs (availability, latency), set SLOs, alert on burn rate.
+8. **DR.** Backups, and for higher tiers, a secondary region with defined RPO/RTO.
+
+**What to emphasize:** "HA isn't one thing — it's removing single points of failure at every layer: compute, network, and data. And I'd define an SLO upfront so 'highly available' has a number, not just a vibe."
+
+## Scenario 3: "Design a monitoring/observability system for a microservices platform."
+
+This plays directly to your strength (and your Athena project).
+
+**Framework:**
+1. **Three pillars.** Metrics (Prometheus), logs (Loki), traces (Tempo/Jaeger via OpenTelemetry) — unified in Grafana.
+2. **Instrumentation strategy.** Standardize on OpenTelemetry so instrumentation is vendor-neutral and consistent across languages.
+3. **What to measure.** Golden signals per service (latency, traffic, errors, saturation); RED method for request-driven services.
+4. **SLI/SLO definition.** Define SLIs per critical service, set SLOs, track error budgets.
+5. **Alerting.** Multi-window burn-rate alerts on SLOs (not raw thresholds); route by severity through Alertmanager; inhibition to prevent alert storms.
+6. **Correlation.** Exemplars and shared trace IDs so you can pivot metric → trace → log for one request.
+7. **Cost/scale.** Control cardinality; use object storage for long-term retention; consider downsampling.
+
+**What to emphasize:** "I actually built exactly this in my Athena project — and the part most people skip is *alerting on SLOs with burn rate*, not raw thresholds, plus controlling cardinality so the metrics system doesn't collapse under its own weight."
+
+## Scenario 4: "Latency is high for a service but error rate is normal. How do you investigate?"
+
+**Framework:**
+1. **Confirm and quantify.** Which percentile — p50 or just p99 (tail latency)? Which endpoints? Started when?
+2. **Rule out load.** Did traffic spike? Is it saturation (CPU throttling, memory pressure, connection pool exhaustion)?
+3. **Use traces — the key tool here.** Open slow traces. Where is the time spent? In the service's own code, or waiting on a downstream call (DB, cache, external API)?
+4. **If downstream:** check that dependency's latency and health. Slow DB query? Lock contention? Undersized connection pool?
+5. **If in-service:** CPU throttling (hitting CPU limits)? GC pauses? A slow code path?
+6. **Check resource saturation.** `container_cpu_cfs_throttled` for throttling; memory pressure; connection pool metrics.
+
+**What to emphasize:** "Latency-without-errors usually means saturation or a slow dependency, not a bug. Traces are decisive — they tell me in seconds whether the time is in our code or downstream, which is the slowest question to answer otherwise."
+
+## Scenario 5: "An alert is paging on-call repeatedly but the issue self-resolves each time. What do you do?"
+
+**Framework:**
+1. **Short-term:** Acknowledge the pattern; don't just keep silencing blindly.
+2. **Assess the alert quality.** Is it actionable? If it self-resolves and needs no human action, it's a bad alert — a dashboard metric masquerading as an alert.
+3. **Fix the alert.** Add a `for` duration so transient spikes don't fire; switch from a raw threshold to a burn-rate or sustained condition; raise the threshold if it's too sensitive.
+4. **But investigate the underlying flapping** — is something actually degrading and recovering (e.g., a pod OOMing and restarting every few hours)? The alert might be noisy *and* hiding a real slow problem.
+5. **Document and improve the runbook.**
+
+**What to emphasize:** "My rule: every alert must require a human action. A self-resolving page is either a tuning problem or it's masking a real recurring issue — and I check for both. I did exactly this cleanup at Cognizant, cutting weekend pages from 8-10 to 2-3."
+
+---
+
+# SECTION 4 — Behavioral Questions (STAR skeletons)
+
+STAR = Situation, Task, Action, Result. I've added the angle each question tests and a skeleton anchored to your real experience. **Fill in your specifics.**
+
+**1. "Tell me about a difficult production incident you handled."**
+*Tests: technical depth + composure.*
+> S: [The OOMKilled service — pods dying every few hours, error spikes]
+> T: [I was on-call; needed to find why memory was growing]
+> A: [Grafana memory slope → confirmed leak not load → exit 137 → log correlation to an endpoint → handed L3 full diagnostic trail]
+> R: [Fixed within a day, memory flattened]
+> Reflection: [Handing off a complete diagnostic trail cut their investigation time in half]
+
+**2. "Tell me about a time you improved a process or reduced toil."**
+*Tests: ownership, proactiveness.*
+> S: [On-call was getting paged 8-10x per weekend, mostly non-actionable]
+> T: [I took ownership of cleaning up the alert rules]
+> A: [Exported 90 days of alerts, categorized by actionability, found 12 rules = 70% of noise, fixed thresholds/added `for`/inhibition]
+> R: [Pages dropped to 2-3/weekend, almost all actionable]
+> Reflection: [Every alert should require a human action]
+
+**3. "Describe a time you disagreed with a teammate or senior."**
+*Tests: communication, handling conflict professionally.*
+> S: [A proposed alert threshold / config change you thought was wrong]
+> T: [Needed to raise the concern without overstepping]
+> A: [Brought data — showed the historical pattern / impact — proposed an alternative, discussed rather than insisted]
+> R: [Reached a better decision together / or disagreed-and-committed]
+> Reflection: [Bring data, not opinions, to disagreements]
+
+**4. "Tell me about a time you failed or made a mistake."**
+*Tests: humility, growth. Pick a real, recoverable mistake — never "I have no failures."*
+> S: [A change/action that didn't go as planned]
+> T: [What you were trying to do]
+> A: [How you caught it, owned it, fixed it]
+> R: [Recovered; no lasting damage]
+> Reflection: [The specific lesson + what you now do differently]
+
+**5. "Tell me about a time you had to learn something new quickly."**
+*Tests: learning agility — your Athena story is perfect here.*
+> S: [Got SRE interview feedback that I lacked hands-on observability building]
+> T: [Needed to close that gap fast]
+> A: [Built Athena — full LGTM stack, OpenTelemetry, SLO alerting — in ~2 weeks, learning by doing]
+> R: [Now have hands-on depth + a portfolio project]
+> Reflection: [The fastest way I learn is building the real thing and breaking it]
+
+**6. "Tell me about a time you took ownership of something outside your role."**
+*Tests: initiative.*
+> [The alert cleanup, or building the health-check/disk-cleanup automation that wasn't assigned but reduced team toil]
+
+**7. "Describe a high-pressure situation and how you handled it."**
+*Tests: composure under stress.*
+> S: [A P1 during on-call — CrashLoopBackOff during a release]
+> A: [Stayed systematic: checked events, found liveness probe failures, identified slow startup vs probe timing, recommended fix]
+> R: [Resolved, documented in runbook]
+> Reflection: [Under pressure, systematic beats fast — and escalate rather than thrash alone]
+
+**8. "Why are you leaving Cognizant?"**
+*Tests: motivation, and that you're running *toward* something.*
+> [Positive framing: "I've grown a lot operating at scale, but I want to go deeper on the engineering and building side of reliability — designing observability and platforms, not just operating them. Building Athena confirmed that's the work I want to do, and I'm looking for a product-focused team where that's the core of the role."]
+
+**9. "Why this company / this role?"**
+*Tests: genuine interest. Research the company first.*
+> [Tie their stack/domain to your strengths: "You run a large observability practice / you're in healthcare where I have domain experience / you have a strong SRE culture — that's exactly the direction I'm building toward."]
+
+**10. "Tell me about a time you handled an on-call escalation well."**
+*Tests: on-call maturity.*
+> S: [An incident where you correctly triaged and escalated]
+> A: [Gathered signal, attempted ops-level fixes, escalated to L3 with full context when it was an app bug]
+> R: [Faster resolution because of the context you provided]
+> Reflection: [Knowing when to escalate with good context is a strength, not a weakness]
+
+---
+
+# SECTION 5 — High-Yield Cheat Sheet (revision notes)
+
+Bullet-point recall, focused on what's commonly tested.
+
+**Linux**
+- Load avg = runnable + uninterruptible (D-state/IO). High load + low CPU = I/O wait.
+- `df` full but `du` not = deleted file held open → `lsof +L1`.
+- Port owner: `ss -tlnp`. CPU/mem hog: `top`, `ps aux --sort=-rss`.
+- OOM: `dmesg | grep -i oom`; container OOM = exit 137.
+- RSS = real RAM (double-counts shared); VSZ = virtual (misleading); PSS = fair share.
+- Hung process: `strace -p`, `/proc/<pid>/stack`, `lsof -p`.
+
+**Networking**
+- Refused = nothing listening (RST). Timeout = dropped (firewall/route).
+- TLS: hello → cert → verify → key exchange → encrypted. 1.3 = 1-RTT.
+- L4 = IP/port, fast. L7 = HTTP host/path, TLS termination, routing.
+- conntrack table full → dropped packets (`dmesg`); raise `nf_conntrack_max`.
+- ndots:5 → short names try search domains first (DNS latency); FQDN with trailing dot skips it.
+
+**Kubernetes**
+- Service = virtual ClusterIP, no process; kube-proxy iptables/IPVS DNAT to Pod IP; conntrack tracks return.
+- iptables mode O(n), IPVS O(1) at scale.
+- Probes: readiness=traffic, liveness=restart, startup=slow-start grace.
+- `kubectl apply`: API server (authn/authz/admission/validate) → etcd → Deployment ctrl → ReplicaSet ctrl → scheduler (filter/score) → kubelet (CRI pull, CNI IP) → endpoints → kube-proxy.
+- QoS eviction order: BestEffort → Burstable → Guaranteed.
+- CrashLoopBackOff debug: `describe` → `logs --previous` → probes/resources/config.
+- etcd lose quorum = read-only (no changes), existing pods keep running.
+
+**Docker**
+- Image = template (layers); container = running instance + writable layer.
+- Multi-stage build = build heavy, ship slim. Order Dockerfile: rarely-changing first (cache).
+- Don't run as root; use slim/distroless; `.dockerignore`.
+
+**CI/CD**
+- Pipeline: test → build → scan → push → deploy/sync.
+- Secrets: encrypted store, injected as masked env at runtime; OIDC for cloud (short-lived).
+- Push vs pull: pull (GitOps) keeps creds in-cluster, Git = source of truth, drift detection.
+- Image tags: immutable (SHA/semver), never `latest` in prod.
+- Blue-green = instant switch/rollback, double resources. Canary = gradual %, low blast radius.
+
+**IaC (Terraform)** ⚠️
+- State = config↔real mapping; remote backend + locking prevents concurrent corruption.
+- Modules = reusable, per-env variables. Drift = real ≠ state; `plan` detects.
+- Secrets: `sensitive` vars, pull from Key Vault/Vault, encrypt state.
+
+**Cloud (Azure)**
+- AKS: Azure manages control plane (free); you manage node pools + workloads.
+- Log Analytics = store/KQL; App Insights = APM on top; Azure Monitor = umbrella.
+- Workload Identity = pods get short-lived AAD tokens, no stored secrets.
+
+**Observability**
+- Metrics (dashboards/alerts), logs (detail), traces (cross-service latency) — correlate.
+- Pull model → free `up` signal. Pushgateway for short-lived jobs.
+- Golden signals: latency, traffic, errors, saturation. RED: rate, errors, duration.
+- `rate()` before `sum()` (reset-aware). p99 = `histogram_quantile(0.99, sum(rate(bucket[5m])) by (le))` — can't avg percentiles.
+- Cardinality = #1 killer; never label with unbounded values (IDs).
+- Loki indexes labels not content (cheap); ELK full-text (expensive).
+
+**Reliability**
+- SLI = measured; SLO = target; SLA = contract with penalties.
+- Error budget = 1 − SLO; spend on features when healthy, reliability when burning.
+- Multi-window burn-rate alert: short (now) + long (sustained) both breach.
+- Toil = manual, repetitive, automatable, scales with growth → cap and automate.
+
+**Incident / On-call**
+- Fix-forward vs rollback: users impacted + cause unclear → roll back first.
+- Postmortem = blameless, timeline, root cause, action items with owners.
+- On-call: stabilize → gather signal → runbook → escalate with context → write up.
+
+**Scripting**
+- Bash: `set -euo pipefail` = fail fast. Truncate (not delete) open log files to free space.
+- Python over Bash for JSON parsing, logic, maintainability.
+
+---
+
+# SECTION 2 — Core Technical Q&A (tagged by difficulty)
+
+Concise model answers. I've kept Azure-primary per your stack.
+
+## Linux internals & troubleshooting
+
+**[Easy] Difference between `top` load average and CPU usage?**
+Load average counts processes runnable *and* in uninterruptible sleep (D-state, usually I/O-blocked). High load + low CPU = I/O wait, not CPU saturation. Check `iostat` and the `wa` column in top.
+
+**[Medium] `df` shows full but `du` doesn't add up. Why?**
+A process holds an open handle to a deleted file — blocks aren't freed until it closes. Find with `lsof +L1` / `lsof | grep deleted`. Fix: restart the process or truncate the open fd. (This is why log cleanup truncates rather than deletes.)
+
+**[Medium] How do you find what's using a port?**
+`ss -tlnp | grep :PORT` — shows the listening PID/process. `ss` is the modern, faster replacement for `netstat`.
+
+**[Hard] A process is hung. How do you find what it's blocked on without killing it?**
+`strace -p <pid>` shows the blocking syscall (read on socket = network wait, futex = lock contention). `cat /proc/<pid>/stack` and `/proc/<pid>/wchan` show kernel state. `lsof -p` shows open files/sockets. Caveat: strace adds overhead — brief use only on production.
+
+**[Hard] RSS vs VSZ vs PSS?**
+VSZ = total virtual address space (misleadingly large). RSS = resident physical RAM but double-counts shared pages. PSS = proportionally splits shared pages — most accurate "real cost." For OOM, RSS is the practical number.
+
+## Networking
+
+**[Easy] Connection refused vs connection timed out?**
+Refused = packet reached host, nothing listening (RST returned) — app/port issue. Timeout = no response — firewall drop, routing, or network policy. The distinction localizes the problem layer.
+
+**[Medium] What happens in a DNS lookup inside Kubernetes?**
+Pod's resolv.conf points to CoreDNS ClusterIP. CoreDNS (watches API for Services/Endpoints) resolves `*.svc.cluster.local` from memory, forwards external names upstream. `ndots:5` causes short names to try search domains first.
+
+**[Medium] Walk through a TLS handshake.**
+Client hello (ciphers, TLS version) → server hello + certificate → client verifies cert chain against trusted CAs → key exchange (ECDHE) establishes a shared session key → encrypted symmetric communication begins. TLS 1.3 cut this to one round trip.
+
+**[Hard] L4 vs L7 load balancing — when each?**
+L4 (TCP/UDP) routes on IP/port, fast, protocol-agnostic, no payload inspection (NLB). L7 (HTTP) routes on host/path/headers, enables TLS termination, path routing, rate limiting (ALB, Ingress). Use L4 for raw throughput/non-HTTP; L7 for HTTP routing and richer control.
+
+## Kubernetes & containers
+
+**[Easy] Pod vs container vs node?**
+Container = a running image instance. Pod = one or more containers sharing network/storage namespace, the smallest deployable unit. Node = the VM/machine running pods.
+
+**[Medium] How does a Service route to Pods?**
+Virtual ClusterIP (no process listens on it). CoreDNS resolves name→ClusterIP. kube-proxy programs iptables/IPVS rules that DNAT the ClusterIP to a backend Pod IP from the EndpointSlice; conntrack tracks it for return traffic.
+
+**[Medium] Liveness vs readiness vs startup probe?**
+Readiness gates traffic (fail = removed from endpoints, not killed). Liveness gates restarts (fail = container killed/restarted). Startup disables the other two until a slow app finishes starting. Misconfigured readiness = silent traffic loss; misconfigured liveness = CrashLoopBackOff.
+
+**[Hard] Walk through `kubectl apply` end to end.**
+API server (authn → authz → admission → validate) → etcd → Deployment controller makes a ReplicaSet → ReplicaSet controller makes Pods (Pending) → scheduler filters/scores nodes, sets nodeName → kubelet pulls image via CRI, CNI assigns IP → readiness passes → endpoints controller updates EndpointSlice → kube-proxy programs routing.
+
+**[Hard] QoS classes and eviction order?**
+Guaranteed (requests==limits), Burstable (requests<limits), BestEffort (none). Under node memory pressure, kubelet evicts BestEffort first, then Burstable over requests, Guaranteed last. Set requests==limits for critical pods.
+
+## CI/CD
+
+**[Easy] CI vs CD?**
+CI = automatically build and test on every change. CD = automatically deliver/deploy that tested artifact. CI catches breakage early; CD makes releases safe and frequent.
+
+**[Medium] Where do GitHub Actions secrets live and how does the runner access them?**
+Encrypted in repo/org secrets, injected as masked env vars into the job at runtime, scoped to that job. Modern cloud auth uses OIDC federation for short-lived tokens instead of stored long-lived credentials.
+
+**[Hard] Push vs pull (GitOps) deployment — why pull?**
+Push: CI holds cluster creds and applies changes (creds leave the pipeline = risk). Pull: in-cluster controller (ArgoCD) watches Git and syncs in — creds stay in-cluster, Git is source of truth, you get drift detection and revert-based rollback. Pull wins on security and auditability.
+
+## Infrastructure as Code ⚠️ (your lighter area — know concepts, be honest on depth)
+
+**[Easy] Why IaC over manual provisioning?**
+Repeatable, version-controlled, reviewable, auditable, eliminates config drift and snowflake servers.
+
+**[Medium] What is Terraform state and why does locking matter?**
+State maps config to real resources so Terraform knows what exists. Two simultaneous applies can corrupt it — remote backends (Azure Storage blob lease, S3+DynamoDB) lock state so the second apply waits.
+
+**[Hard] How do you manage multi-environment infra and prevent drift?**
+Reusable modules called with per-env variables; remote state per environment; everything through Terraform (no console changes); `terraform plan` in CI to detect drift before apply.
+*(Your honest add: "I've worked with modules and state during our CloudFormation→Terraform migration, modifying variables and configs; I'm deepening my module-authoring.")*
+
+## Cloud — Azure-primary
+
+**[Easy] What does Azure manage in AKS vs you?**
+Azure manages the control plane (API server, etcd, scheduler) — free, invisible. You manage worker node pools, workloads, config; you get managed upgrades and Azure AD/ACR/Monitor integration.
+
+**[Medium] Azure Monitor vs App Insights vs Log Analytics?**
+Log Analytics = data store + query engine (KQL). App Insights = APM layer (requests, dependencies, exceptions) on top. Azure Monitor = umbrella tying metrics/logs/alerts together. App Insights data lands in Log Analytics.
+
+**[Medium] How do pods get Azure credentials securely?**
+Workload Identity — federates a K8s service account with an Azure AD identity for short-lived tokens, no stored secrets. (Older: pod-managed identities.)
+
+**[Hard] Design HA for an AKS workload across failure domains.**
+Multi-zone node pools, `topologySpreadConstraints` to spread replicas across zones, PodDisruptionBudgets for safe drains, multiple replicas, managed DB with zone redundancy, health probes + HPA, and ideally a secondary region for DR.
+
+## Observability (your strength — deepest)
+
+**[Easy] Metrics vs logs vs traces?**
+Metrics = numeric time-series, cheap, for dashboards/alerts. Logs = discrete event detail. Traces = one request across services, for "where did it slow down." They correlate: metric → trace → log.
+
+**[Medium] Why pull-based Prometheus?**
+Scraping gives a free up/down signal (`up` metric), centralized scrape control, no need for services to know where to push. Downside: short-lived jobs may die before scrape → Pushgateway for those.
+
+**[Medium] Four golden signals + PromQL?**
+Latency (`histogram_quantile(0.99, ...)`), Traffic (`sum(rate(requests[5m]))`), Errors (`sum(rate(requests{status=~"5.."}[5m]))/sum(rate(requests[5m]))`), Saturation (usage/limit).
+
+**[Hard] Why `rate()` before `sum()`, and how do you get p99?**
+Counters reset on restart; `rate()` is reset-aware, raw `sum()` first turns a restart into a fake cliff. p99: `histogram_quantile(0.99, sum(rate(bucket[5m])) by (le))` — aggregate buckets first; you can't average percentiles.
+
+**[Hard] Biggest Prometheus failure mode?**
+Cardinality explosion — high-cardinality labels (user IDs, request IDs) create millions of series and OOM Prometheus. Control via relabeling, never labeling with unbounded values, monitoring `prometheus_tsdb_head_series`.
+
+## Reliability concepts
+
+**[Easy] SLI vs SLO vs SLA?**
+SLI = measured indicator (% successful requests). SLO = internal target (99.5%). SLA = external contract with penalties (usually looser than the SLO).
+
+**[Medium] What's an error budget and why useful?**
+1 − SLO = allowed failure (0.5% = ~216 min/month). It's a shared currency: budget remaining = ship features; budget burned = focus on reliability. Removes the dev-vs-ops "how reliable" argument.
+
+**[Medium] What is toil?**
+Manual, repetitive, automatable, reactive work that scales with service size and adds no lasting value. SRE aims to cap and automate it. (Your disk-cleanup/image-update scripts are toil reduction.)
+
+**[Hard] Multi-window burn-rate alerting — why better than thresholds?**
+Alerts on budget consumption *rate*, not raw thresholds. Two windows (short confirms it's happening now, long confirms it's sustained) must both breach — kills flapping, fast recovery, urgency matched to severity.
+
+## Incident management & on-call
+
+**[Easy] What's a runbook?**
+A documented procedure for handling a known scenario — steps to diagnose and remediate — so any on-call engineer can respond consistently without tribal knowledge.
+
+**[Medium] What makes a good postmortem?**
+Blameless (focus on systems, not people), clear timeline, root cause, impact, and concrete action items with owners. Goal: learn and prevent recurrence, not assign fault.
+
+**[Hard] Fix-forward vs rollback — how do you decide?**
+If users are impacted and cause isn't obvious — roll back first, stop the bleeding, investigate after (error budget burns while you debug). Minor issue with a known quick fix — fix forward. For bad deploys, rollback is usually the right first move.
+
+## Scripting / automation
+
+**[Easy] Why `set -euo pipefail` in Bash?**
+Fail fast — exit on any error (`e`), undefined variable (`u`), or pipe failure (`pipefail`). Without it, ops scripts silently continue after errors, which is dangerous.
+
+**[Medium] When Python over Bash?**
+Bash for simple orchestration/glue. Python when parsing structured data (JSON), complex logic, error handling, or maintainability matter. (Your log-analyzer is Python because JSON parsing + aggregation is painful in Bash.)
+
+**[Hard] Walk through a script that safely updates a K8s image with rollback.**
+Validate args/namespace/deployment exist → capture current image → `kubectl set image` → `kubectl rollout status` with timeout → verify ready replicas → on failure `kubectl rollout undo`. (This is your image-update script — be ready to explain each safety check.)
+
+---
+
+## 1. "Walk me through your day-to-day at Cognizant."
+
+> "My day breaks into three buckets. About 40% is observability — I start by reviewing our Grafana dashboards and any overnight alerts to check platform health, investigate whether alerts were real issues or tuning problems, maintain our 5-6 production dashboards, and tune Prometheus alert rules. About 30% is incident response — when a P1 or P2 comes in I do the initial investigation using App Insights logs, Kubernetes events, and Dynatrace traces; if it's an ops-level issue like a crash loop or image-pull problem I resolve it, and if it's an application bug I partner with the L3 engineering team and hand them a full diagnostic trail. The last 30% is automation and infrastructure — Bash and Python scripts for operational tasks, supporting our CI/CD pipelines, and contributing to our Terraform work. And I'm on alternate-weekend on-call as first responder."
+
+*Why it works: structured, honest about the L3 partnership, leads with observability (your strength).*
+
+---
+
+## 2. "You mention ~1,500 pods and 86 deployments. Describe the platform architecture."
+
+> "It's a healthcare platform running on Azure Kubernetes Service across multiple environments. The observability architecture has a few layers: Prometheus collects both Kubernetes-level metrics like pod health and CPU/memory, and application metrics from the services. Grafana is the visualization layer where I own dashboards for latency, error rates, and resource saturation. For deeper APM and distributed tracing we use Dynatrace, and for application logs and telemetry we use Azure Application Insights and Log Analytics, which integrate tightly with our Azure infra. Alerting runs through Alertmanager with severity-based routing. CI/CD is on GitHub Actions and Azure DevOps, and infrastructure is managed with Terraform — currently being migrated from CloudFormation. My deepest ownership is the observability layer and the operational reliability of the platform."
+
+*Why it works: describes the system, then names your specific ownership scope honestly.*
+
+---
+
+## 3. "You say you 'own' the Prometheus and Grafana stack. What does owning it actually involve?"
+
+> "Day to day it means I maintain our 5-6 production dashboards — building and updating panels for latency, error rates, pod health, and saturation. I author and tune the Prometheus alert rules, which is the bigger part of ownership: adjusting thresholds, adding `for` durations so transient spikes don't fire, and adding inhibition rules so we don't get alert storms. When we onboard a new service or a team needs visibility into something, I build the dashboard and the alerts for it. I don't manage the Prometheus infrastructure itself at the cluster level — that's a platform-team responsibility — but the dashboards, queries, and alerting logic are mine."
+
+*Why it works: honest scoping — you own dashboards/alerts/queries, not the Prometheus server infra. Defensible if drilled.*
+
+---
+
+## 4. ⚠️ "You reduced MTTR by ~40%. How was that measured, and what did you personally do?"
+
+> "That was a team-level improvement tracked through our ticketing system and Dynatrace over my time on the account — average resolution time for P2 incidents came down by roughly that much. My personal contribution was on the detection and triage side: I tuned our alerts to reduce noise so real signals weren't buried, built dashboards that gave incident responders the right context faster, and when I triaged incidents I handed the engineering teams a complete diagnostic trail — the metric trend, the relevant traces, the suspect component — instead of just 'service is down.' Engineering told me that context cut their investigation time significantly. So I wouldn't claim I single-handedly drove a 40% reduction — it was a team effort, and my piece was making detection and triage faster."
+
+*Why it works: honest attribution. You don't overclaim, which is exactly what protects you when they drill.*
+
+---
+
+## 5. "Tell me about a specific P1 or P2 incident you handled end to end."
+
+> "A backend service started getting OOMKilled every few hours — pods would run fine, then get killed and restart, and our error-rate dashboard spiked on each restart. I picked it up from the alert. First I checked Grafana and saw memory climbing on a steady slope regardless of traffic, which told me it was a leak, not load. I confirmed OOMKilled from the pod's last state — exit code 137. Then I correlated with App Insights logs and found one endpoint being hit repeatedly during the growth window. I handed the engineering team the memory trend, the trace data, and the suspect endpoint — they found an unbounded in-memory cache and fixed it within a day. Memory flattened out completely. What I took away was that handing off a full diagnostic trail, not just 'it's OOMing,' cut their investigation time roughly in half."
+
+*Why it works: full STAR-R, shows technical depth and the partnership reality.*
+
+---
+
+## 6. "How do you tune a noisy alert? Give a real example."
+
+> "When I moved into the DevOps role, on-call was getting paged 8-10 times a weekend and most of it wasn't actionable. I exported about 90 days of alert history and categorized each alert by whether it actually led to a human action or self-resolved. About 12 rules were causing 70% of the noise. For each, I looked at the underlying Prometheus rule — some had thresholds on raw counts instead of rates, some were missing a `for` clause so they fired on instantaneous spikes, and some were on infrastructure metrics that didn't actually impact users. I fixed thresholds, added `for` durations, added inhibition rules so downstream alerts didn't fire when an upstream one was active, and removed the non-actionable ones. Weekend pages dropped to 2-3, almost all actionable. My principle became: every alert should require a human action — if it doesn't, it's a dashboard metric, not an alert."
+
+*Why it works: concrete, methodical, ends with a memorable principle.*
+
+---
+
+## 7. "You use Dynatrace. Walk me through diagnosing a performance issue with it."
+
+> "When a service shows elevated latency, I'll start in Dynatrace by looking at the service's response-time trend and breaking it down — is it all requests or specific endpoints, and is the time being spent in the service itself or in a downstream call like a database or external dependency. The distributed traces are the key part — I can open a slow trace and see exactly which span is taking the time, which immediately tells me whether it's our code or a dependency. From there I'll correlate with the metrics — is there a saturation issue, a slow query, a dependency that's degraded. Then I package that up for the engineering team if it's a code-level fix."
+
+*Why it works: shows you use it as an investigator (traces, breakdowns), not just a dashboard viewer.*
+
+---
+
+## 8. ⚠️ "You contributed to a CloudFormation-to-Terraform migration. What was your role?"
+
+> "I joined the team while that migration was in progress, so my contribution was on the variable and environment-configuration side — modifying module variables and environment-specific configs for our resources, and reviewing plans. The senior engineers on the team owned the module design and the overall migration strategy. It was a great learning period for me — I got hands-on with how Terraform state works, why state locking matters, and how modules are structured to stay DRY across environments. I'd say I'm comfortable working within an existing Terraform codebase, and authoring modules from scratch is an area I'm actively deepening — which is part of why I built the infrastructure layer in my Athena project with Terraform."
+
+*Why it works: completely honest about scope, frames it as growth, bridges to Athena. Will not crack under drilling.*
+
+---
+
+## 9. "How does your CI/CD pipeline work, and what's your role in it?"
+
+> "Our pipelines run on GitHub Actions and Azure DevOps — they handle build, test, image build and push to ACR, and deployment across environments. My role is on the operational side: when a build or release fails, I troubleshoot it — whether it's a failing test, an image-pull issue, a misconfigured step, or a deployment that didn't roll out cleanly. I also support image promotion across environments and rollback procedures when a release causes a regression. The pipeline design and the workflow architecture are owned by senior engineers on the team. To get hands-on with building pipelines end-to-end, I built a full GitHub Actions pipeline in my Athena project — build, test, image push, manifest update, with approval gates — so I understand the design side as well as the operations side."
+
+*Why it works: honest (you support, don't design at work), but shows you've done the design side in Athena.*
+
+---
+
+## 10. "Tell me about Athena — why you built it and the architecture."
+
+> "Athena is an observability platform I built from scratch. The motivation was honest: at work I operate an observability stack that was set up before me — I tune and maintain it — but I hadn't designed one end to end, and that gap came up in an SRE interview. So I built one. It instruments three microservices in different languages — Python, Node, and Go — each emitting metrics, logs, and traces. Metrics go to Prometheus via ServiceMonitor CRDs. Logs go through Promtail to Loki. Traces go through an OpenTelemetry Collector to Tempo. Everything's unified in Grafana so I can pivot from a metric anomaly to a trace to the exact log line. I defined an SLO — 99.5% availability — with multi-window burn-rate alerting through Alertmanager. And the most valuable part was deliberately breaking it five ways — memory leaks, latency injection, dependency failures, error spikes, probe misconfigurations — and documenting the full root-cause investigation for each. It's all on my GitHub."
+
+*Why it works: honest motivation, complete architecture, ends on the failure-simulation hook that's memorable.*
+
+---
+
+## 11. "In Athena, why Loki over ELK? Why Tempo? Why OpenTelemetry?"
+
+> "Loki indexes only metadata labels — namespace, pod, container — not the full log content. ELK indexes every word, which is powerful for ad-hoc search but expensive at scale. Loki's assumption is that you query logs by context you already know — which service, which pod — usually because you arrived from a dashboard or trace. That makes it much cheaper and simpler to operate, which is the right trade-off for most operational logging. Tempo applies the same idea to traces — store cheaply, retrieve by trace ID, no expensive attribute indexing. And OpenTelemetry was deliberate because it decouples instrumentation from the backend — I instrument once with vendor-neutral SDKs, and I could swap Tempo for Datadog or anything else without touching application code. Vendor lock-in through the SDK is basically over now that every major vendor accepts OTLP."
+
+*Why it works: real design reasoning with trade-offs — proves you didn't just follow a tutorial.*
+
+---
+
+## 12. "Show me a PromQL query you've written and explain it."
+
+> "A common one is the error rate for a service: `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))`. The `rate` gives me the per-second rate of 5xx responses over a 5-minute window, I `sum` across all instances, and divide by the total request rate to get an error ratio. One important detail — I always apply `rate` before `sum`, never the other way around, because counters reset to zero when a pod restarts, and `rate` is reset-aware. If you sum the raw counters first, a single restart looks like a massive drop and gives you garbage. For latency I use `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))` — aggregating the buckets first, because you can't average percentiles across instances."
+
+*Why it works: shows real PromQL fluency plus two senior-level gotchas (rate-before-sum, can't-average-percentiles).*
+
+---
+
+## 13. "You're on alternate-weekend on-call. Walk me through your on-call process."
+
+> "When I get paged, the first thing is to stabilize — is there an immediate mitigation or rollback that stops user impact, even before I fully understand the cause. Then I gather signal — check the dashboards, look at what changed recently like a deploy or config push, pull the relevant logs and traces. If there's a runbook for the scenario, I follow it. If it's within my scope — an ops-level issue — I resolve it. If it's beyond my scope, like an application bug, I escalate to L3 with full context rather than thrashing on it alone. And afterward I contribute to the post-incident review and update the runbook so the next person has it. The mindset I try to keep is: systematic beats fast, and escalating with good context is a strength, not a weakness."
+
+*Why it works: calm, systematic, honest about escalation, mature mindset.*
+
+---
+
+## 14. "A pod is in CrashLoopBackOff. How do you debug it?"
+
+> "First I'll `kubectl describe pod` to read the events and the container's last state — that tells me the exit code and reason. Then `kubectl logs --previous` to see the crashed container's logs, since the current one may have already restarted. From there it's usually one of a few causes: an application error on startup, a failed liveness probe, a missing config or secret, OOMKilled which shows as exit 137, or a bad image. I had a real case where a service went into CrashLoopBackOff right after a release — the events showed liveness probe failures, and it turned out a config change had made startup slower than the probe's initial delay, so the kubelet was killing it before it finished starting. The fix was increasing initialDelaySeconds and adding a startupProbe. So I always check whether it's the app actually crashing or a probe killing a healthy-but-slow container."
+
+*Why it works: clear method + a real story that shows depth (probe-vs-startup distinction).*
+
+---
+
+## 15. "Why are you leaving Cognizant after 4 years?"
+
+> "I've grown a lot there — from intern to DevOps Engineer, operating a real production platform at scale, and I'm grateful for that foundation. But the nature of the role is mostly operating systems that other teams designed. I want to go deeper on the engineering and building side of reliability — designing observability, building platforms, writing the automation, not just running it. Building Athena confirmed that's the work I find most engaging. So I'm looking for a product-focused team or a strong SRE org where that kind of hands-on building is the core of the role, and where I can keep growing toward senior reliability engineering."
+
+*Why it works: positive, honest, running toward something, ties to Athena.*
+
+---
+
+## 16. ⚠️ "You're Azure-strong but list AWS. How comfortable are you with AWS?"
+
+> "I want to be straight about that — my production experience is on Azure, specifically AKS, App Insights, and Azure Monitor, which is what I work with daily. My AWS experience is at the project level — I've worked with the core services like EC2, S3, VPC, IAM, and EKS in personal projects, so I understand the fundamentals and the mapping between Azure and AWS concepts is pretty direct. I'm confident I could ramp up on AWS quickly in a production context, but I wouldn't claim deep production AWS experience today. The reliability and Kubernetes concepts transfer directly — it's mostly learning the AWS-specific service names and tooling."
+
+*Why it works: honest, doesn't bluff, frames transferability without overclaiming. This honesty actually builds trust.*
+
+---
+
+## 17. "How do you decide what deserves an alert versus a dashboard metric?"
+
+> "My rule is simple: every alert should require a human action. If something fires and the on-call engineer looks at it and there's nothing for them to do — it self-resolves, or it's just informational — then it shouldn't be an alert, it should be a dashboard metric you look at when investigating. Alerts are expensive: they wake people up, they cause fatigue, and fatigue means real signals get missed. So I'm aggressive about keeping alerts actionable and tied to user impact or SLO burn, and pushing everything else to dashboards. That's exactly the cleanup I did at Cognizant — cutting our weekend pages from 8-10 to 2-3 by removing non-actionable alerts."
+
+*Why it works: clear philosophy + ties back to real work.*
+
+---
+
+## 18. "Healthcare is regulated. How did that affect how you worked?"
+
+> "It made me much more careful about production changes. In healthcare there's real sensitivity around data and availability, so there was strong emphasis on change management — changes going through proper approval, clear audit trails, and caution about anything touching production. It shaped good habits: documenting what I did and why, being conservative about production changes, and understanding that reliability isn't just a technical goal but sometimes a compliance one. I think that discipline around change management and audit awareness is something that transfers well to any environment where reliability genuinely matters, like finance."
+
+*Why it works: turns domain into a transferable strength, relevant for GCC/finance targets.*
+
+---
+
+## 19. "What's the hardest production problem you've debugged, and what did you learn?"
+
+> "Probably the OOMKilled memory leak I mentioned — what made it hard wasn't the eventual root cause, it was that nothing was obviously broken. There was no full outage because we had replicas, just intermittent error spikes every few hours, so it was easy to dismiss as noise. The breakthrough was recognizing the pattern — memory climbing on a steady slope regardless of traffic — which told me it was accumulation, not load. The lesson that stuck with me is that the hardest incidents are often the slow, intermittent ones that don't trip an obvious alarm, and that the speed of resolution depends heavily on how clearly you can hand off context to whoever owns the fix. That's actually what pushed me to start building diagnostic templates so anyone on the team could investigate the same way."
+
+*Why it works: shows depth, pattern recognition, and a growth-oriented reflection.*
+
+---
+
+## 20. "What do you want to learn or grow into next?"
+
+> "Two things. First, the building and design side of reliability — I'm strong on operating and observing, and I want to get deeper on designing observability platforms, writing infrastructure as code from scratch, and platform engineering. Building Athena was a deliberate step in that direction. Second, scale — I've operated a real platform, but I want to work somewhere with bigger scale and stronger SRE practices so I can learn things like SLO-driven engineering, capacity planning, and reliability at a level I haven't been exposed to yet. Honestly that's a big part of why I'm looking to move to a product-focused team."
+
+*Why it works: self-aware about gaps, shows ambition, ties to why you're interviewing.*
+
+---
+
 # 1. KUBERNETES
 
 **Q: What happens when you run `kubectl apply`? (asked constantly)**
