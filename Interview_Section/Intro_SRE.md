@@ -82,7 +82,7 @@ up{app="checkout-api"}
 ---
 
 Alerting rule YAML (burn-rate) -->
-'''
+```
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -110,10 +110,10 @@ spec:
       annotations:
         summary: "checkout-api burning error budget fast"
         description: "At this rate the 30-day budget exhausts in ~2 days"
-'''
+```
 ---
 Bash script (the disk cleanup — explain the safety) -->
-'''
+```
 #!/bin/bash
 set -euo pipefail   # fail fast: exit on error, undefined var, or pipe failure
 
@@ -126,27 +126,27 @@ if (( usage < THRESHOLD )); then
 fi
 
 echo "Disk at ${usage}%, cleaning up..."
-'''
+```
 # AKS uses containerd, so crictl not docker
-'''
+```
 crictl images --quiet | while read -r img; do
     if ! crictl ps -a --quiet --image "$img" | grep -q .; then
         crictl rmi "$img" >/dev/null 2>&1 || true
     fi
 done
-'''
+```
 # Remove old compressed logs, truncate huge active ones (preserve file handles)
-'''
+```
 find /var/log -name "*.gz" -mtime +14 -delete 2>/dev/null || true
 find /var/log -name "*.log" -size +500M -exec truncate -s 100M {} \; 2>/dev/null || true
 
 final=$(df -h /var/lib | awk 'NR==2 {print $5}' | sed 's/%//')
 echo "Cleanup done. Disk now at ${final}%"
-'''
+```
 ---
 
 Python script (the bit to explain: why Python over Bash) -->
-'''
+```
 #!/usr/bin/env python3
 """Summarize error patterns from exported App Insights logs."""
 import json, re, sys
@@ -175,11 +175,11 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
+```
 ---
 
  Kubernetes YAML (Deployment with probes — explain the probe difference) -->
-'''
+```
  apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -218,5 +218,5 @@ spec:
             port: 8080
           initialDelaySeconds: 15
           periodSeconds: 10
-'''
+```
   ---
