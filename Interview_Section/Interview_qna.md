@@ -1,3 +1,91 @@
+
+---
+### Cloud Networking & Infra Q&A Set
+
+Same format as before: question, concise model answer, difficulty. Azure-primary since that's your platform. Active recall — cover the answer, say it out loud, check.
+
+### Core networking fundamentals
+
+**[Easy] What is a VPC / VNet, and what's a subnet?**
+A VNet (Azure) / VPC (AWS) is an isolated private network in the cloud where your resources live. A subnet is a segment of that network's IP range — you split a VNet into subnets to separate tiers (e.g., a public subnet for load balancers, private subnets for app and database tiers) and apply different routing/security per subnet.
+
+**[Easy] Public vs private subnet — what's the difference?**
+A public subnet has a route to the internet gateway, so resources can be directly reachable from / reach the internet. A private subnet has no direct internet route — resources reach out via a NAT gateway (outbound only) and aren't directly reachable from the internet. Databases and app servers go in private; load balancers / bastion go in public.
+
+**[Medium] What's a NAT gateway and why do you need it?**
+It lets resources in a private subnet make *outbound* connections to the internet (e.g., to pull packages or call an API) without being directly reachable *inbound*. It does source NAT — translating the private IP to a public one for outbound traffic, and tracking the connection so responses return. It's how you give private resources internet access without exposing them.
+
+**[Medium] Security group / NSG — stateful or stateless, and what's the implication?**
+NSGs (Azure) and security groups (AWS) are **stateful** — if you allow an inbound connection, the return traffic is automatically allowed; you don't need a matching outbound rule. Network ACLs (AWS) are stateless — you must explicitly allow both directions. Stateful is simpler and the common case; the gotcha with stateless is forgetting the return rule.
+
+**[Hard] Connection refused vs connection timed out — what does each tell you about the network path?**
+Refused = the packet reached the host and something actively rejected it (RST) — the service is down, wrong port, or not bound; an app/host-layer issue. Timed out = no response at all — usually a firewall/NSG/security group silently dropping the packet, a routing problem, or a network policy blocking it. The distinction tells you whether to look at the application/host (refused) or the network/firewall (timeout).
+
+### Load balancing
+
+**[Easy] L4 vs L7 load balancer?**
+L4 routes on IP and port — fast, protocol-agnostic, no payload inspection (Azure Load Balancer, AWS NLB). L7 routes on HTTP attributes like host, path, headers — enables TLS termination, path-based routing, rate limiting (Azure Application Gateway, AWS ALB). Use L4 for raw throughput or non-HTTP; L7 for HTTP routing and richer control.
+
+**[Medium] How does a load balancer know not to send traffic to an unhealthy instance?**
+Health checks (health probes) — the LB periodically pings a configured endpoint (e.g., `/healthz`) on each backend. If an instance fails the probe threshold, the LB removes it from the rotation and stops sending traffic until it passes again. This is what gives you automatic failover at the LB layer.
+
+**[Medium] In Azure, when do you use Azure Load Balancer vs Application Gateway vs Front Door?**
+Azure Load Balancer = L4, regional, raw TCP/UDP distribution. Application Gateway = L7, regional, HTTP routing + WAF + TLS termination. Front Door = global, L7, edge routing across regions with CDN and global failover. You pick based on layer (L4 vs L7) and scope (regional vs global).
+
+### DNS
+
+**[Medium] How does DNS resolution work at a high level?**
+A resolver queries the DNS hierarchy: root servers → TLD servers (.com) → authoritative nameservers for the domain, which return the record (A/AAAA for IP, CNAME for alias). Results are cached per TTL to avoid repeating the chain. In cloud, you also have private DNS zones for internal name resolution within a VNet.
+
+**[Medium] Public vs private DNS zone in cloud?**
+A public DNS zone resolves names reachable from the internet (your customer-facing domain). A private DNS zone resolves names only within your VNet — used for internal service discovery, private endpoints, and resources that shouldn't be publicly resolvable. Same DNS mechanics, different scope.
+
+**[Hard] A service intermittently fails to resolve an external hostname. How do you debug?**
+Check whether it's DNS specifically: `nslookup`/`dig` the name, time it. In Kubernetes, check CoreDNS health and the `ndots:5` amplification (short names trying search domains first). Look for CoreDNS pod resource pressure or conntrack exhaustion on UDP 53. Check the upstream resolver the cloud provides. Solutions: scale CoreDNS, NodeLocal DNSCache, use FQDNs, fix ndots. Intermittent DNS is often a capacity or conntrack issue, not a config one.
+
+### AKS / Kubernetes networking (your platform — know cold)
+
+**[Medium] Azure CNI vs kubenet in AKS — what's the difference and the tradeoff?**
+Azure CNI gives every pod a real IP from the VNet subnet — pods are first-class VNet citizens, directly routable, better performance, integrates with VNet features; but it consumes a lot of VNet IP space (nodes pre-allocate IP blocks), so you can exhaust the subnet at scale. Kubenet gives pods IPs from a separate overlay range and NATs through the node — conserves VNet IPs but adds a hop and has routing limitations. Choose Azure CNI when you need VNet integration and have IP space; kubenet when conserving IPs matters more.
+
+**[Medium] How does traffic from the internet reach a pod in AKS?**
+Internet → Azure Load Balancer (or Application Gateway via AGIC) → the Ingress controller pods → the Service (ClusterIP) → the pod. The LB is provisioned when you create a Service of type LoadBalancer (typically just for the ingress controller); the ingress controller does L7 host/path routing to internal Services, which kube-proxy routes to pods.
+
+**[Hard] A pod can't reach an Azure SQL database. Walk through debugging.**
+Layer by layer: from inside the pod, test DNS (`nslookup` the DB hostname), then connectivity (`nc -zv host 1433`). If DNS fails — check private DNS zone / private endpoint config. If connect times out — check the NSG rules on the subnet, the DB's firewall rules (is the AKS subnet allowed?), and whether you're using a private endpoint correctly. If refused — DB-side issue. Also check if a NetworkPolicy is blocking egress from the pod. Isolate whether it's the pod, the node, DNS, the network path, or the DB firewall.
+
+### Reliability / infra design
+
+**[Medium] Availability Zone vs Region — what's the difference and why does it matter for SRE?**
+A Region is a geographic location (e.g., Central India). An Availability Zone is a physically separate datacenter within a region with independent power/cooling/network. Spreading across AZs survives a single-datacenter failure with low latency between zones; spreading across regions survives a whole-region outage but with higher latency and complexity. SRE cares because designing for AZ failure is table stakes, and region failure is your DR strategy.
+
+**[Medium] How do you design an AKS workload to survive an AZ failure?**
+Use a multi-zone node pool spread across AZs, use `topologySpreadConstraints` to distribute pod replicas across zones (not all on one), run enough replicas with headroom so losing a zone doesn't drop you below capacity, use a multi-zone-redundant managed database, and set PodDisruptionBudgets. The goal: losing one zone degrades capacity but doesn't cause an outage.
+
+**[Hard] Explain RTO and RPO and how they drive DR design.**
+RTO (Recovery Time Objective) = how long you can afford to be down before recovery. RPO (Recovery Point Objective) = how much data loss you can tolerate, measured in time. They drive cost/complexity: a tight RPO (near-zero data loss) needs synchronous replication or frequent backups; a tight RTO (fast recovery) needs warm/hot standby rather than cold restore. You design backups, replication, and failover strategy to meet the agreed RTO/RPO — looser targets are cheaper, tighter targets cost more.
+
+**[Hard] What reliability patterns prevent a slow dependency from cascading into a full outage?**
+Timeouts (don't wait forever on a slow call), retries with backoff and jitter (recover from transient failures without thundering-herd), circuit breakers (stop calling a failing dependency to let it recover and fail fast), bulkheads (isolate resource pools so one failing dependency can't exhaust all threads/connections), load shedding (drop excess load to protect core function), and graceful degradation (serve reduced functionality rather than failing entirely). Together they contain blast radius.
+
+### Connection / kernel-level (overlaps Linux)
+
+**[Hard] What is conntrack and how does it cause cloud/K8s networking incidents?**
+conntrack is the kernel's connection-tracking table that remembers NAT mappings so return traffic routes correctly. It has a max size; under high connection churn it fills, and new connections get dropped — you see `nf_conntrack: table full` in dmesg and intermittent failures that look like the app's fault. Common in high-traffic Kubernetes nodes. Fix: raise `nf_conntrack_max`, reduce churn via connection pooling/keepalive, and reduce DNS-driven churn with NodeLocal DNSCache.
+
+---
+
+## How to use this set
+
+- **Highest priority for you:** the AKS networking questions (Azure CNI vs kubenet, internet→pod path, pod→DB debugging) — that's your platform and the most likely drill area.
+- **The debugging scenarios** (refused vs timeout, can't-reach-DB, intermittent DNS) are SRE favorites — practice walking through them *layer by layer, out loud*. The structure (isolate the layer: DNS → connectivity → firewall → app) matters more than memorizing.
+- **The reliability patterns + AZ/RTO/RPO** questions are for design rounds — that JD you shared specifically wanted these.
+
+This connects directly to the Kubernetes networking deep-dive we already did (CNI, kube-proxy, CoreDNS) — together they cover the full networking stack from kernel to cloud.
+
+Same honest reminder I keep coming back to: this is good *study material*, but it becomes interview-winning only when you can *say it under pressure*. The debugging scenarios especially — reading "isolate layer by layer" and actually doing it fluently when an interviewer fires "a pod can't reach the DB, go" are different skills.
+
+Want to do the thing that actually tests it — a **mock interview** where I throw these networking scenarios (plus a few from the earlier sets) at you, you answer in your own words, and I grade your delivery with follow-ups? That's the step that's still missing.
 ---
 
 # SECTION 3 — System Design / Scenario Questions
