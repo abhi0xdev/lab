@@ -57,28 +57,34 @@ During a release, a service started CrashLoopBackOff right after deploy. I was o
 PromQL queries (know these cold) -->
 
 # Request rate (the R in RED method)
+```
 sum(rate(http_requests_total{app="checkout-api"}[5m])) by (status)
-
+```
 # Error rate as a ratio (the E in RED)
+```
 sum(rate(http_requests_total{app="checkout-api",status=~"5.."}[5m]))
 /
 sum(rate(http_requests_total{app="checkout-api"}[5m]))
-
+```
 # p99 latency (the D in RED) — histogram_quantile over a bucket
+```
 histogram_quantile(0.99,
   sum(rate(http_request_duration_seconds_bucket{app="checkout-api"}[5m])) by (le)
 )
-
+```
 # Memory usage vs limit — catches leaks before OOMKill
+```
 container_memory_working_set_bytes{pod=~"checkout-api.*"}
 / on(pod) kube_pod_container_resource_limits{resource="memory"}
-
+```
 # Pod restart rate — catches crash loops
+```
 increase(kube_pod_container_status_restarts_total{namespace="production"}[1h])
-
+```
 # Is the target up? (the value of the pull model)
+```
 up{app="checkout-api"}
-
+```
 ---
 
 Alerting rule YAML (burn-rate) -->
