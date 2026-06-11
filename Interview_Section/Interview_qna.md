@@ -72,20 +72,6 @@ Timeouts (don't wait forever on a slow call), retries with backoff and jitter (r
 
 **[Hard] What is conntrack and how does it cause cloud/K8s networking incidents?**
 conntrack is the kernel's connection-tracking table that remembers NAT mappings so return traffic routes correctly. It has a max size; under high connection churn it fills, and new connections get dropped — you see `nf_conntrack: table full` in dmesg and intermittent failures that look like the app's fault. Common in high-traffic Kubernetes nodes. Fix: raise `nf_conntrack_max`, reduce churn via connection pooling/keepalive, and reduce DNS-driven churn with NodeLocal DNSCache.
-
----
-
-## How to use this set
-
-- **Highest priority for you:** the AKS networking questions (Azure CNI vs kubenet, internet→pod path, pod→DB debugging) — that's your platform and the most likely drill area.
-- **The debugging scenarios** (refused vs timeout, can't-reach-DB, intermittent DNS) are SRE favorites — practice walking through them *layer by layer, out loud*. The structure (isolate the layer: DNS → connectivity → firewall → app) matters more than memorizing.
-- **The reliability patterns + AZ/RTO/RPO** questions are for design rounds — that JD you shared specifically wanted these.
-
-This connects directly to the Kubernetes networking deep-dive we already did (CNI, kube-proxy, CoreDNS) — together they cover the full networking stack from kernel to cloud.
-
-Same honest reminder I keep coming back to: this is good *study material*, but it becomes interview-winning only when you can *say it under pressure*. The debugging scenarios especially — reading "isolate layer by layer" and actually doing it fluently when an interviewer fires "a pod can't reach the DB, go" are different skills.
-
-Want to do the thing that actually tests it — a **mock interview** where I throw these networking scenarios (plus a few from the earlier sets) at you, you answer in your own words, and I grade your delivery with follow-ups? That's the step that's still missing.
 ---
 
 # SECTION 3 — System Design / Scenario Questions
