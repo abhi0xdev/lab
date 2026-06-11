@@ -1,29 +1,25 @@
 Intro -->
-Sure. I'm Abhinandan, I have 4 years of experience working as a DevOps and SRE engineer at Cognizant, on a healthcare-domain platform running on Azure Kubernetes.
-I joined as an intern in February 2022, moved to Junior DevOps Engineer within six months, and was promoted to DevOps Engineer in mid-2023 — so my growth has been within the same account, which gave me deep familiarity with the platform.
-My work sits between DevOps and SRE. On the reliability side, I own our Prometheus and Grafana observability stack for an AKS environment running around 1,500 pods, I'm on the incident rotation handling P1 and P2 issues, and I do a lot of root-cause analysis using Dynatrace and Azure Monitor. On the delivery side, I support our GitHub Actions and Azure DevOps pipelines, contribute to Terraform infrastructure, and automate operational tasks with Bash and Python.
-Outside of work I recently built a full observability platform from scratch called Athena — Prometheus, Loki, Tempo, OpenTelemetry, Grafana — with proper SLO-based alerting, mainly to deepen my hands-on building skills. It's on my GitHub.
-I'm Microsoft AZ-400 certified, currently serving notice, and I'm looking for a DevOps or SRE role where I can go deeper on reliability and observability at scale
+Sure. I'm Abhinandan, I've been at Cognizant about 4 years now, working as a DevOps and SRE engineer on a healthcare platform that runs on Azure Kubernetes.
+Most of my work is reliability — I look after our Prometheus and Grafana stack for an AKS environment with around 1,500 pods, I'm on the P1/P2 on-call rotation, and I do a lot of root-cause work with Dynatrace and Azure Monitor. I also support our CI/CD pipelines and automate the repetitive ops stuff with Bash and Python.
+Outside work I built my own observability platform from scratch — Prometheus, Loki, Tempo, OpenTelemetry — just to get hands-on building one end to end. It's on my GitHub.
+I'm AZ-400 certified and looking for an SRE or DevOps role where I can go deeper on reliability at scale
 
 ---
 
 Day-to-Day Activities -->
 
-My day breaks into three buckets.
-First, observability — roughly 40% of my time. I start by reviewing Grafana dashboards and overnight alerts to check platform health. If alerts fired overnight, I investigate whether they were real or a tuning problem. I maintain 5-6 dashboards covering latency, error rates, pod health, and saturation, and I tune Prometheus alert rules to keep signal-to-noise high. I also use Dynatrace heavily for trace-level analysis of slow endpoints and error spikes.
-Second, incident response — about 30%. When a P1 or P2 comes in, I do initial investigation — pulling logs from App Insights and Log Analytics, checking Kubernetes events, looking at Dynatrace traces. If it's something I can handle at the ops level — a crash loop from a bad probe, an image-pull issue, a node resource problem — I resolve it. If it's an application bug, I partner with the L3 engineering team and hand them a full diagnostic trail so they fix it faster.
-Third, automation and infrastructure — about 30%. I write Bash and Python for operational tasks like node disk cleanup and image updates, I support our CI/CD pipelines when builds or releases fail, and I've contributed to our Terraform infrastructure during the migration from CloudFormation.
-And I'm on an alternate-weekend on-call rotation as first responder for P1/P2 alerts
+Honestly it splits into about three things. The biggest chunk — maybe 40% — is observability. I usually start the day going through the Grafana dashboards and whatever alerts fired overnight, figuring out if something was actually wrong or if it's just an alert that needs tuning. I look after five or six dashboards — latency, error rates, pod health, that kind of thing — and I spend a fair bit of time tuning alert rules so on-call isn't drowning in noise. I lean on Dynatrace a lot too, especially for tracing down slow endpoints.
+Then there's incident response, roughly 30%. When a P1 or P2 comes in, I do the first pass — pull logs from App Insights and Log Analytics, check the Kubernetes events, look at the traces. If it's something on the ops side, like a crash loop from a bad probe or an image-pull issue, I'll just fix it. If it turns out to be an actual application bug, I hand it to the L3 engineering team — but I make sure I give them the full picture so they're not starting from scratch.
+The rest is automation and infra. I write Bash and Python for the repetitive stuff — disk cleanup on nodes, image updates — and I help out when our CI/CD pipelines break. I also pitched in on our Terraform migration off CloudFormation. And I'm on an alternate-weekend on-call rotation as first responder
 
 ---
 
 Project Workflow -->
 
-At Cognizant I work on a healthcare platform running on AKS — around 86 deployments and 1,500 pods across multiple environments, supported by separate platform, infrastructure, dev, and QA teams.
-The observability architecture has a few layers. Prometheus collects metrics — both Kubernetes-level like pod health and CPU/memory, and application metrics from the services. Grafana is our visualization layer, where I own dashboards for latency, error rates, and saturation. For deeper APM and distributed tracing we use Dynatrace, and for application logs and telemetry we use Azure Application Insights and Log Analytics, which integrate tightly with our Azure infra.
-On alerting, we use Alertmanager with severity-based routing. When I joined, on-call was getting paged for non-actionable alerts — I spent significant effort tuning thresholds, adding inhibition rules, and aligning alerts to real user impact.
-On the delivery side, CI/CD runs on GitHub Actions and Azure DevOps. The pipeline design is owned by senior engineers; I support the operational side — troubleshooting failures, image promotion, rollbacks. Infrastructure is moving from CloudFormation to Terraform, and I've contributed on the variable and environment-config side.
-My deepest ownership is the observability layer and the operational reliability of the platform.
+So the platform I work on is a healthcare app running on AKS — somewhere around 86 deployments and 1,500 pods across our environments, with separate teams for platform, infra, dev, and QA.
+On the observability side, Prometheus handles the metrics — both the Kubernetes-level stuff like pod health and CPU, and the application metrics coming from the services themselves. Grafana sits on top for visualization, and that's where I own the dashboards. For the deeper tracing and APM we use Dynatrace, and for app logs we're on Azure App Insights and Log Analytics since they tie into our Azure setup nicely. Alerting goes through Alertmanager with severity-based routing — and that's an area I put real work into, because when I joined, on-call was getting paged for stuff that didn't matter. I spent a lot of time tuning thresholds and adding inhibition rules so the alerts actually mean something now.
+On the delivery side, the pipelines run on GitHub Actions and Azure DevOps. The senior folks own the pipeline design — I handle the operational side, so troubleshooting failures, image promotion, rollbacks. And like I mentioned, I've chipped in on the Terraform migration on the config side.
+But if you ask where I'm strongest — it's really the observability layer and keeping the platform reliable day to day
 
 ---
 
