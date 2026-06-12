@@ -1,5 +1,3 @@
----
-
 # PART 1 — GITHUB ACTIONS
 
 ## Basics
