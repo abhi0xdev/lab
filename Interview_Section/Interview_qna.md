@@ -1,5 +1,1098 @@
 
 ---
+
+# PART 1 — CORE OBJECTS & THEIR YAML
+
+## Pod (the foundation)
+
+**⭐ Q: What is a Pod and why not just run containers directly?**
+A Pod is the smallest deployable unit — one or more containers that share a network namespace (same IP, same localhost), storage volumes, and lifecycle. You don't run bare containers because Kubernetes schedules, heals, and networks at the Pod level. Multiple containers in one Pod is for tightly-coupled helpers (sidecars). *Why: foundational.*
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app
+  labels:
+    app: checkout          # labels = how everything selects this pod
+spec:
+  containers:
+  - name: checkout
+    image: myacr.azurecr.io/checkout:v1.2.3
+    ports:
+    - containerPort: 8080
+    resources:
+      requests:            # scheduler places based on this
+        cpu: 100m
+        memory: 128Mi
+      limits:              # exceed memory = OOMKilled; exceed CPU = throttled
+        cpu: 500m
+        memory: 256Mi
+```
+
+You rarely create bare Pods — you use a controller (Deployment) that manages Pods for you.
+
+## Deployment ⭐ (the workhorse)
+
+**⭐ Q: What does a Deployment do and what's underneath it?**
+A Deployment manages stateless apps. It creates a ReplicaSet, which creates Pods. It handles rolling updates (new ReplicaSet alongside old, gradually shifting), rollbacks, and scaling. You change the Deployment's pod template → it creates a new ReplicaSet and transitions. *Why: the most-used object; cross-ref the kubectl-apply lifecycle from our internals deep-dive.*
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: checkout          # MUST match template labels below
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1            # max extra pods above desired during update
+      maxUnavailable: 0      # max pods below desired (0 = zero-downtime)
+  template:
+    metadata:
+      labels:
+        app: checkout        # pods get this label; selector finds them
+    spec:
+      containers:
+      - name: checkout
+        image: myacr.azurecr.io/checkout:v1.2.3
+        ports:
+        - containerPort: 8080
+        readinessProbe:       # gates traffic
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:        # gates restart
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+```
+
+**⭐ Key YAML points to explain in an interview:**
+- **selector must match template labels** — if they don't, the Deployment can't find its pods (a common error).
+- **maxSurge/maxUnavailable** control rollout speed vs availability. `maxUnavailable: 0` = never drop below desired count = zero-downtime, but needs surge capacity.
+- **Probes** — readiness gates traffic, liveness gates restart (cross-ref the probe deep-dive).
+
+## Service ⭐
+
+**⭐ Q: What is a Service and the YAML for each type?**
+A Service is a stable virtual IP (ClusterIP) load-balancing to a set of Pods selected by labels. Pods are ephemeral (IPs change); the Service gives a stable endpoint. (Cross-ref: how it routes — CoreDNS → ClusterIP → kube-proxy iptables DNAT → Pod IP — from our networking deep-dive.)
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+spec:
+  type: ClusterIP            # default; internal only
+  selector:
+    app: checkout            # routes to pods with this label
+  ports:
+  - port: 80                 # the Service's port
+    targetPort: 8080         # the container's port
+```
+
+**The types (cross-ref earlier):** ClusterIP (internal), NodePort (port on every node), LoadBalancer (cloud LB), ExternalName (CNAME). The `selector` is the link — it's how the Service finds its backend Pods, via the EndpointSlice the controller maintains.
+
+**⭐ Interview point:** `port` vs `targetPort` — `port` is what clients hit on the Service; `targetPort` is the container's actual port. People confuse them.
+
+## ConfigMap & Secret
+
+**⭐ Q: ConfigMap vs Secret, and how do Pods consume them?**
+ConfigMap = non-sensitive config (env-specific values, config files). Secret = sensitive data (passwords, tokens, keys) — base64-encoded (NOT encrypted by default; that's a common misconception). Both can be consumed as environment variables or mounted as files.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  LOG_LEVEL: "info"
+  DB_HOST: "postgres.prod.svc.cluster.local"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+type: Opaque
+data:
+  DB_PASSWORD: c2VjcmV0    # base64 — NOT encrypted, just encoded
+```
+
+Consuming in a Pod:
+```yaml
+    envFrom:
+    - configMapRef:
+        name: app-config
+    env:
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: app-secret
+          key: DB_PASSWORD
+```
+
+**⭐ Interview gotcha:** "Secrets are base64-*encoded*, not encrypted — anyone with API access can decode them. For real security you enable encryption-at-rest in etcd, use RBAC to restrict access, and ideally an external secret store (Key Vault via CSI driver, External Secrets Operator, Vault)." That answer shows real security awareness.
+
+## StatefulSet ⭐
+
+**⭐ Q: StatefulSet vs Deployment — when and why?**
+StatefulSet gives Pods **stable, ordered identity**: named `name-0`, `name-1`, created/scaled in order, each with a **stable network name** (via a headless Service) and its **own persistent volume** that follows it across reschedules. Use for databases, Kafka, Zookeeper, anything needing stable identity or per-pod storage. Deployments treat pods as interchangeable; StatefulSets don't.
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres-headless    # headless Service for stable DNS
+  replicas: 3
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:               # each pod gets its OWN PVC
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+```
+
+**⭐ Interview point:** `volumeClaimTemplates` — each Pod gets its *own* PVC (postgres-data-0, postgres-data-1), unlike a Deployment where pods would share or have no stable storage. The headless Service (`clusterIP: None`) gives each pod a stable DNS name like `postgres-0.postgres-headless`.
+
+## DaemonSet
+
+**Q: What's a DaemonSet and when do you use it?**
+Runs exactly one Pod per node (or per matching node). Used for node-level agents: log collectors (Promtail, Fluent Bit), monitoring (node-exporter), CNI plugins, kube-proxy itself. When a new node joins, the DaemonSet automatically schedules a pod on it. *Why: tests knowledge of the "one per node" pattern.*
+
+## Job & CronJob
+
+**Q: Job vs CronJob?**
+A Job runs a Pod to completion (batch task — a migration, a backup) and tracks success/retries. A CronJob runs Jobs on a schedule (like cron). *Why: batch/scheduled work; your disk-cleanup could run as a CronJob.*
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: disk-cleanup
+spec:
+  schedule: "0 2 * * *"        # 2am daily
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: cleanup:v1
+          restartPolicy: OnFailure
+```
+
+---
+
+# PART 2 — CONFIGURATION & SCHEDULING YAML
+
+## Resource requests/limits ⭐ (covered above, but the concept)
+
+**⭐ Q: Requests vs limits and QoS classes?**
+Requests = guaranteed minimum the scheduler reserves (used for placement). Limits = hard ceiling (exceed memory → OOMKilled exit 137; exceed CPU → throttled, not killed). The request/limit ratio sets QoS: Guaranteed (requests==limits), Burstable (requests<limits), BestEffort (none) — which determines eviction order under pressure (cross-ref the QoS deep-dive). *Why: directly ties to your OOMKilled incident.*
+
+## Probes ⭐
+
+**⭐ Q: The three probes and a real misconfiguration scenario?**
+Readiness (gates traffic — fail = removed from endpoints), Liveness (gates restart — fail = killed), Startup (grace period for slow-starting apps — disables the others until ready). Your CrashLoopBackOff story is the perfect illustration: liveness initialDelay too short for a slow startup → kubelet kills it before it's ready → fix with higher initialDelaySeconds + a startupProbe. (Cross-ref earlier.)
+
+```yaml
+        startupProbe:           # for slow starters
+          httpGet: {path: /healthz, port: 8080}
+          failureThreshold: 30  # allows 30 × periodSeconds for startup
+          periodSeconds: 10
+```
+
+## Affinity, taints, topology spread
+
+**Q: nodeSelector vs affinity vs taints (the YAML)?**
+nodeSelector = simplest, exact label match. nodeAffinity = richer (required/preferred, operators). podAffinity/anti-affinity = schedule relative to other pods. Taints (on nodes) + tolerations (on pods) = repel/allow. topologySpreadConstraints = distribute replicas across zones/nodes. (Cross-ref the scheduling deep-dive.)
+
+```yaml
+      topologySpreadConstraints:    # spread replicas across zones for HA
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels: {app: checkout}
+```
+
+**⭐ Interview point:** topologySpreadConstraints is the modern, lighter way to ensure replicas spread across AZs — key for surviving a zone failure.
+
+## PodDisruptionBudget
+
+**Q: What's a PDB and what does it protect against?**
+Sets minimum available pods during *voluntary* disruptions (node drains, upgrades, autoscaler scale-down). Does NOT protect against involuntary disruptions (node crash). (Cross-ref the failure-modes deep-dive.)
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: checkout-pdb
+spec:
+  minAvailable: 2              # never drain below 2 pods
+  selector:
+    matchLabels: {app: checkout}
+```
+
+## HPA ⭐
+
+**⭐ Q: HorizontalPodAutoscaler — YAML and how it works?**
+Scales replica count based on a metric vs target. Formula: `desired = ceil(current × currentMetric / targetMetric)`. Needs resource requests set (to compute CPU %). Polls metrics-server ~every 15s.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: checkout-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: checkout
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70    # scale to keep avg CPU ~70%
+```
+
+---
+
+# PART 3 — NETWORKING YAML
+
+## Ingress ⭐
+
+**⭐ Q: Ingress vs Service, and the YAML?**
+A Service (LoadBalancer) is L4, one cloud LB per service — expensive. An Ingress is L7 HTTP routing (host/path) to multiple services behind a *single* LB, with TLS termination. An Ingress controller (nginx) runs as pods and implements the Ingress rules. (Cross-ref the Ingress-vs-LB networking deep-dive.)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts: [app.example.com]
+    secretName: app-tls         # TLS cert stored as a Secret
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /checkout
+        pathType: Prefix
+        backend:
+          service:
+            name: checkout
+            port:
+              number: 80
+      - path: /orders
+        pathType: Prefix
+        backend:
+          service:
+            name: orders
+            port:
+              number: 80
+```
+
+**⭐ Interview point:** One Ingress + one LoadBalancer routes to many services by path/host — that's why you use Ingress instead of a LoadBalancer Service per app.
+
+## NetworkPolicy ⭐
+
+**⭐ Q: NetworkPolicy YAML and the critical gotcha?**
+Defines allowed ingress/egress by label selector. **The gotcha: the CNI must support it** (Calico, Cilium do; Flannel alone doesn't) — apply a policy on an unsupporting CNI and it silently does nothing. Also: once a policy selects a pod, that pod becomes default-deny for that direction. (Cross-ref networking deep-dive.)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: checkout-allow-from-gateway
+spec:
+  podSelector:
+    matchLabels: {app: checkout}     # applies to checkout pods
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {app: api-gateway}   # only gateway can reach checkout
+    ports:
+    - protocol: TCP
+      port: 8080
+```
+
+---
+
+# PART 4 — STORAGE YAML
+
+**⭐ Q: PV / PVC / StorageClass — the relationship and YAML?**
+StorageClass defines *how* to provision (which provisioner, disk type). PVC = a request for storage. PV = the actual storage. Dynamic provisioning: PVC → StorageClass → PV created automatically. (Cross-ref storage deep-dive.)
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]      # one node at a time (cloud block disk)
+  storageClassName: managed-premium   # Azure managed disk
+  resources:
+    requests:
+      storage: 20Gi
+```
+
+**⭐ Interview point:** Access modes — ReadWriteOnce (one node, cloud block disks like Azure Disk), ReadWriteMany (many nodes, needs Azure Files/NFS). RWO is why a Deployment with a cloud disk can't easily run pods across nodes — cross-ref the storage deep-dive.
+
+---
+
+# PART 5 — RBAC YAML
+
+**⭐ Q: RBAC — Role, ClusterRole, RoleBinding, and the YAML?**
+RBAC controls who can do what. Role (namespace-scoped) / ClusterRole (cluster-wide) define *permissions*. RoleBinding / ClusterRoleBinding *attach* those permissions to a user, group, or ServiceAccount.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: production
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]      # read-only on pods
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: monitoring-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**⭐ Interview point:** Roles define permissions, Bindings connect them to identities. Principle of least privilege — give the minimum verbs/resources needed. ServiceAccounts are how *pods* authenticate to the API (cross-ref the admission/authz part of the internals deep-dive).
+
+---
+
+# PART 6 — SCENARIO-BASED QUESTIONS (interview gold)
+
+**⭐ Scenario 1: "A pod is in CrashLoopBackOff. Walk me through debugging."**
+`kubectl describe pod` (events + last state + exit code) → `kubectl logs --previous` (the crashed container's logs) → identify the cause: app error on startup, failed liveness probe, missing config/secret, OOMKilled (137), bad image. Your real story: liveness initialDelay too short for slow startup → fix with startupProbe. (Cross-ref.) *Narrate the investigation, don't just list commands.*
+
+**⭐ Scenario 2: "A pod is Pending and won't schedule. Why?"**
+`kubectl describe pod` → read the FailedScheduling event. Causes: insufficient resources (no node has enough for requests), taints not tolerated, nodeSelector/affinity matches nothing, unbound PVC, pod anti-affinity unsatisfiable. The gotcha: "insufficient resources" is based on *requests* not actual usage — nodes can be "full" on requests while CPU usage is low. (Cross-ref.)
+
+**⭐ Scenario 3: "A Service has endpoints but traffic intermittently fails. Debug it."**
+Possible: a pod is Ready but app isn't truly serving (readiness too lenient); kube-proxy reconciliation lag after endpoint changes; a terminating pod still in endpoints getting traffic mid-shutdown (fix: preStop hook + graceful shutdown); conntrack table full. Check `kubectl get endpoints`, the readiness probe, and the pod termination handling. (Cross-ref.)
+
+**⭐ Scenario 4: "A Deployment rollout is stuck — `kubectl rollout status` hangs. Why?"**
+`kubectl get rs` (old vs new replica counts), `kubectl describe` the new ReplicaSet's pods. Causes: new pods failing readiness (rollout won't progress past maxUnavailable), image pull errors, insufficient resources for surge pods, CrashLoopBackOff in new version, PDB blocking old pods from terminating. The rollout gates on new pods becoming Ready. (Cross-ref.)
+
+**Scenario 5: "Pod is Running but receives no traffic. Walk through it."**
+Check READY column — Running but 0/1 Ready means readiness failing → not added to Service endpoints → no traffic. `kubectl get endpoints <svc>` shows `<none>`. `kubectl describe pod` shows the readiness probe failure. This is the "readiness misconfig = silent traffic loss" pattern from your Athena incident 05. (Cross-ref.)
+
+**Scenario 6: "A node went NotReady. What happens to its pods and when?"**
+kubelet stops heartbeating → node controller marks NotReady after ~40s, applies a NotReady:NoExecute taint → pods without toleration evicted after tolerationSeconds (default 300s) → recreated elsewhere by their controller. The 5-min delay avoids mass rescheduling on transient blips. (Cross-ref.)
+
+**Scenario 7: "A pod is stuck Terminating forever. Why and how to handle?"**
+Causes: a finalizer waiting on cleanup that never completes; kubelet on the node is down; volume won't unmount; process ignoring SIGTERM. `kubectl describe`. If a stuck finalizer, patch it out carefully. If node is dead, force-delete (`--grace-period=0 --force`) — but understand it just removes it from the API; dangerous for StatefulSets (split-brain risk). (Cross-ref.)
+
+**Scenario 8: "How do you do a zero-downtime deployment?"**
+RollingUpdate with `maxUnavailable: 0` and `maxSurge: 1` (new pods come up before old ones go down); proper readiness probes (don't route until truly ready); preStop hook + graceful shutdown (drain in-flight requests); PodDisruptionBudget; multiple replicas. For higher safety, blue-green or canary (cross-ref your progressive-delivery prep). *Why: ties together probes, rollout strategy, and PDBs.*
+
+**Scenario 9: "Memory usage keeps growing and pods get OOMKilled every few hours. Debug it."**
+Your real incident. Memory climbing on a steady slope regardless of traffic = leak not load. Confirm OOMKilled via exit 137 in last state. Correlate with logs/traces to find the leaking endpoint. Short-term: increase limit / add replicas; real fix: the code leak. Prevention: alert at 80% of limit *before* the OOMKill. (Cross-ref your incident story.)
+
+**Scenario 10: "How would you debug a pod that can't reach an external service / another pod?"**
+Exec in (or use a netshoot debug pod). Test DNS (`nslookup`), connectivity (`nc -zv`), check NetworkPolicy blocking egress, check if it's pod vs node level, check the target's health. Isolate layer by layer: DNS → connectivity → policy → target. (Cross-ref the networking debugging.)
+
+---
+
+# PART 1 — TERRAFORM FUNDAMENTALS
+
+## Basics
+
+**⭐ Q: What is Terraform and what problem does it solve?**
+Terraform is an Infrastructure-as-Code tool — you declare your desired infrastructure in config files (HCL), and Terraform makes the real world match it. It solves manual, error-prone, inconsistent provisioning: infra becomes version-controlled, reviewable, repeatable, and auditable, with no config drift or snowflake servers. *Why: the "why IaC" opener.*
+
+**⭐ Q: Declarative vs imperative — which is Terraform and why does it matter?**
+Terraform is **declarative** — you describe the *desired end state* ("I want 3 VMs"), and Terraform figures out *how* to get there (create, update, or delete to reach it). Imperative (like a bash script) describes the *steps*. Declarative means you can run it repeatedly and it converges to the same state (idempotent) without you tracking what already exists. *Why: tests core understanding; declarative + idempotent is the whole point.*
+
+**Q: What's the difference between Terraform and Ansible / CloudFormation?**
+Terraform: cloud-agnostic provisioning (creating infra) across many providers, declarative, state-based. CloudFormation: AWS-only provisioning. Ansible: primarily configuration management (configuring existing servers — installing software, managing config), procedural. They overlap but Terraform is for *provisioning infra*, Ansible for *configuring it*. Often used together. *Why: you migrated FROM CloudFormation, so expect this comparison — and you can speak to it honestly.*
+
+**Q: What's the core Terraform workflow?**
+`terraform init` (download providers, set up backend) → `terraform plan` (preview changes — the diff between config and real state) → `terraform apply` (execute) → `terraform destroy` (tear down). *Why: basic fluency.*
+
+**⭐ Q: What's the difference between `plan`, `apply`, and `refresh`?**
+`plan` = dry run; shows what *would* change by comparing config vs state vs real infrastructure — no changes made. `apply` = executes the plan, makes real changes, updates state. `refresh` = updates state to match real-world resources without changing infra (now folded into plan/apply by default). *Why: `plan` before `apply` is the safety habit; tests if you understand the dry-run.*
+
+## State
+
+**⭐ Q: What is Terraform state and why is it critical?**
+State (`terraform.tfstate`) is Terraform's record of what it has provisioned — the mapping between your config and real resources (resource IDs, attributes, dependencies). Terraform compares config → state → reality to decide what to change. Without state, Terraform wouldn't know what already exists and would try to recreate everything. *Why: state is THE concept that separates people who understand Terraform from people who just ran it.*
+
+**⭐ Q: Why should state be stored remotely, not locally / in Git?**
+Local state breaks team collaboration (everyone has a different copy) and risks loss. Git is worse — state often contains *secrets in plaintext* (passwords, keys), so committing it is a security leak. A remote backend (Azure Storage, S3, Terraform Cloud) gives a single shared source of truth, encryption at rest, and — critically — state locking. *Why: a top Terraform question; the "state has secrets" point shows real awareness.*
+
+**⭐ Q: What happens if two engineers run `terraform apply` at the same time?**
+Without locking, they can corrupt the state file or make conflicting changes (race condition). The solution is **state locking** — a remote backend acquires an exclusive lock during operations (Azure Storage uses a blob lease, S3 uses a DynamoDB lock table). The second apply waits or fails until the lock releases. *Why: the single most-asked Terraform scenario; the answer is "remote backend with locking."*
+
+**Q: What is `terraform import`?**
+It brings *existing* infrastructure (created manually or by another tool) under Terraform management by adding it to state — without recreating it. Useful when adopting Terraform for resources that already exist. You still have to write the matching config. *Why: comes up when discussing brownfield adoption / migrating to Terraform.*
+
+---
+
+# PART 2 — MODULES, VARIABLES, STRUCTURE
+
+**⭐ Q: What is a Terraform module and why use one?**
+A module is a reusable, parameterized package of resources — a folder of `.tf` files you can call with different inputs. Instead of copy-pasting the same VNet/AKS config across dev/staging/prod, you write a module once and call it with per-environment variables. Promotes DRY, consistency, and easier maintenance. Every Terraform config is technically a "root module" that can call child modules. *Why: modules are how you scale Terraform across an org — the key intermediate concept.*
+*(Your honest add if drilled deep: "I've worked within existing modules — passing variables, environment configs — during our CloudFormation-to-Terraform migration. Authoring complex modules from scratch is something I'm building.")*
+
+**Q: Variables, outputs, locals — what's each?**
+**Variables** (`variable`) = inputs to a module (parameterize it). **Outputs** (`output`) = values a module exposes to its caller or to other modules (e.g., the VNet ID). **Locals** (`locals`) = computed/reused values within a config (like local constants, DRY within a file). *Why: tests understanding of how data flows through Terraform.*
+
+**Q: How do you manage multiple environments (dev/staging/prod)?**
+Common approaches: separate state files per environment (separate backend keys), call shared modules with per-env variable files (`dev.tfvars`, `prod.tfvars`), or use a directory structure (`environments/dev/`, `environments/prod/`). Terraform **workspaces** are another option but are often discouraged for prod separation because they share config and it's easy to apply to the wrong one. *Why: real-world structure question; mentioning the workspace caveat shows maturity.*
+
+**Q: What are Terraform workspaces and their limitation?**
+Workspaces let one config have multiple independent states (e.g., `dev`, `prod`) without duplicating files. Limitation: they share the *same* code, so it's easy to accidentally apply to the wrong environment, and they don't isolate well for very different environments. Many teams prefer separate directories/state for prod isolation. *Why: a known gotcha — knowing *not* to over-rely on workspaces is the senior signal.*
+
+**Q: What's the difference between `count` and `for_each`?**
+Both create multiple instances of a resource. `count` uses an integer index (`count = 3`) — but if you remove an item from the middle, everything after it re-indexes and gets recreated. `for_each` uses a map/set with stable keys — adding/removing one item doesn't disturb the others. Prefer `for_each` when items can change. *Why: tests deeper module-authoring knowledge; the re-indexing gotcha is advanced.*
+
+---
+
+# PART 3 — DRIFT, DEPENDENCIES, LIFECYCLE
+
+**⭐ Q: What is drift and how do you detect/handle it?**
+Drift is when real infrastructure differs from what's in state — almost always because someone made a *manual change* in the cloud console. `terraform plan` detects it (it refreshes real state and shows the difference from config). Handling: either `apply` to revert reality back to config, or update the config to match the intended change, then apply. Best practice: prevent drift by making *all* changes through Terraform — no manual console edits. *Why: drift is a core operational reality; the "no manual changes" discipline is the key takeaway.*
+
+**Q: How does Terraform handle dependencies between resources?**
+Mostly *implicitly* — if resource B references resource A's attribute (e.g., a subnet referencing a VNet's ID), Terraform infers A must be created first and builds a dependency graph. For cases with no direct reference, `depends_on` declares an explicit dependency. Terraform creates/destroys in dependency order, parallelizing where it can. *Why: tests understanding of the dependency graph — the engine behind apply ordering.*
+
+**Q: What does the `lifecycle` block do?**
+Controls resource behavior: `create_before_destroy` (make the new one before destroying the old — avoids downtime), `prevent_destroy` (guard against accidental deletion of critical resources like a prod database), `ignore_changes` (ignore drift on specific attributes managed outside Terraform). *Why: shows production-hardening awareness.*
+
+**Q: What's the difference between changing a resource that updates in-place vs forces replacement?**
+Some attribute changes can be applied in-place (e.g., a tag); others require destroying and recreating the resource (e.g., changing certain immutable properties). `terraform plan` shows this — `~` = update in place, `-/+` = destroy and recreate. The danger: a small config change can trigger a replacement of a critical resource (downtime/data loss). Always read the plan carefully. *Why: a real "I almost deleted prod" scenario; reading the plan symbols is crucial.*
+
+---
+
+# PART 4 — PROVISIONERS, FUNCTIONS, SECRETS
+
+**Q: What are provisioners and why are they discouraged?**
+Provisioners (`local-exec`, `remote-exec`) run scripts during apply (e.g., run a command on a new VM). They're a last resort because they're not declarative, don't track state, and break idempotency — if a provisioner fails, the resource is marked tainted. Prefer cloud-init, configuration management (Ansible), or baked images instead. *Why: tests whether you know the "right" declarative way vs the escape hatch.*
+
+**⭐ Q: How do you handle secrets in Terraform?**
+Never hardcode secrets in `.tf` files (they'd be in version control). Mark variables `sensitive = true` (hides them from plan/apply output). Pull secrets from a secret manager (Azure Key Vault, Vault, AWS Secrets Manager) at apply time via data sources. And crucially — **state contains secrets in plaintext**, so the remote backend must be encrypted and access-controlled. *Why: security question; the "state holds secrets" point is the depth signal.*
+
+**Q: What's a data source vs a resource?**
+A `resource` block *creates/manages* infrastructure. A `data` source *reads* existing information (e.g., look up an existing VNet, fetch a Key Vault secret, get the latest AMI) without managing it. Data sources let you reference things Terraform doesn't own. *Why: tests understanding of read vs manage.*
+
+**Q: What's a `.terraform.lock.hcl` file?**
+The dependency lock file — it pins provider versions so everyone on the team and CI uses the exact same provider versions, ensuring reproducible runs. Commit it to version control. *Why: reproducibility question; analogous to package-lock.json.*
+
+---
+
+# PART 5 — SCENARIO-BASED QUESTIONS
+
+**⭐ Scenario 1: "Someone manually changed a resource in the cloud console. What happens on the next `terraform apply`?"**
+On the next `plan`, Terraform refreshes real state, detects the drift, and shows it wants to revert the manual change back to match the config. If you `apply`, it overwrites the manual change. The lesson: manual changes get clobbered — all changes should go through Terraform. If the manual change was intentional, you update the config (or use `ignore_changes`) first. *Why: the canonical drift scenario.*
+
+**⭐ Scenario 2: "Two engineers ran apply simultaneously and the state looks corrupted. What went wrong and how do you prevent it?"**
+No state locking — concurrent applies raced and corrupted the state file. Prevention: remote backend with locking (Azure Storage blob lease / S3 + DynamoDB). Recovery: restore state from a backup/version (remote backends version state), or carefully reconcile. *Why: the locking scenario; tests prevention + recovery.*
+
+**Scenario 3: "`terraform plan` wants to destroy and recreate your production database. You only changed a tag. What do you do?"**
+Stop — do NOT apply blindly. Read the plan: a `-/+` means replacement. Figure out *why* a tag change triggers replacement (maybe it's actually a different attribute, or a provider quirk). For a critical resource, use `prevent_destroy` in a lifecycle block as a guardrail, and investigate before applying. Never apply a plan that destroys prod data without understanding it. *Why: tests the "read the plan carefully" discipline and lifecycle guardrails — a real near-miss scenario.*
+
+**Scenario 4: "Your state file is out of sync with reality — a resource exists in the cloud but not in state (or vice versa). How do you fix it?"**
+Resource exists in cloud but not state → `terraform import` to bring it under management. Resource in state but deleted in cloud → `terraform plan` will want to recreate it (or use `terraform state rm` to forget it if intentional). For more surgery, `terraform state` subcommands (`mv`, `rm`, `list`) manipulate state safely. *Why: tests state management depth — `import` and `state rm` are the tools.*
+
+**Scenario 5: "How do you safely make changes to shared production infrastructure with a team?"**
+Remote state with locking; everything via pull requests with `terraform plan` output reviewed before merge (run plan in CI); separate state per environment; use `prevent_destroy` on critical resources; apply through a pipeline (not laptops) so it's audited and consistent; never make manual console changes. *Why: tests team/production workflow maturity — exactly what a DevOps role cares about.*
+
+**Scenario 6: "A `terraform apply` failed halfway through. What's the state now and what do you do?"**
+Terraform applies resources in dependency order; a mid-apply failure means *some* resources were created (and are in state) and others weren't. State reflects what succeeded. You investigate the error (often a quota, permission, or dependency issue), fix it, and re-run apply — Terraform is idempotent, so it picks up where it left off, creating only what's missing. A resource that failed mid-creation may be marked *tainted* and recreated next apply. *Why: tests understanding that Terraform is resumable and state tracks partial progress.*
+
+---
+
+# PART 1 — DOCKER FUNDAMENTALS
+
+## Basics
+
+**⭐ Q: What's the difference between an image and a container?**
+An image is a read-only template — a layered filesystem plus metadata (entrypoint, env, ports). A container is a running (or stopped) instance of an image, with a thin writable layer on top. Image = the class, container = the object. You can run many containers from one image. *Why: the most fundamental Docker concept; everything builds on it.*
+
+**⭐ Q: How is a container different from a VM?**
+A VM virtualizes hardware and runs a full guest OS with its own kernel — heavy (GBs, slow boot). A container virtualizes the OS — it shares the *host kernel* and isolates only the process using Linux namespaces and cgroups — lightweight (MBs, starts in milliseconds). Containers are processes with isolation, not mini-machines. *Why: tests whether you understand containers aren't "lightweight VMs" — they're isolated host processes.*
+
+**⭐ Q: What actually makes a container isolated? (the kernel primitives)**
+Two Linux kernel features. **Namespaces** isolate *what a process can see* — its own PID namespace (own process tree), network namespace (own interfaces/IPs), mount namespace (own filesystem view), user namespace, etc. **cgroups** (control groups) limit *what a process can use* — CPU, memory, I/O. Docker/containerd just orchestrate these kernel features. *Why: senior-level — shows containers are Linux features, not magic. Comes up often.*
+
+**Q: What is the Docker daemon, client, and registry?**
+The **client** (`docker` CLI) sends commands. The **daemon** (`dockerd`) does the actual work — building, running, managing containers. The **registry** (Docker Hub, ACR, ECR) stores images. The client talks to the daemon over a socket/API; the daemon pulls/pushes to the registry. *Why: explains the architecture and why "docker build" runs server-side on the daemon.*
+
+**Q: What's the container lifecycle / common commands?**
+`docker build` (image from Dockerfile) → `docker run` (create + start a container) → `docker ps` (list running) → `docker stop`/`start`/`restart` → `docker rm` (remove container) / `docker rmi` (remove image) → `docker logs`, `docker exec -it <c> bash` (shell into running container). *Why: basic fluency check.*
+
+**Q: `docker stop` vs `docker kill`?**
+`docker stop` sends SIGTERM, waits (default 10s grace), then SIGKILL — graceful. `docker kill` sends SIGKILL immediately — forceful. Always prefer `stop` so the app can clean up. *Why: maps directly to Kubernetes pod termination — same SIGTERM-then-SIGKILL pattern.*
+
+## Image layers & internals
+
+**⭐ Q: How do Docker image layers work?**
+Each instruction in a Dockerfile (`RUN`, `COPY`, `ADD`) creates a read-only layer. Layers stack via a union filesystem (overlay2). Containers add a thin writable layer on top. Layers are **cached and shared** — if two images share a base, that base is stored once. *Why: foundational to understanding caching, image size, and build speed.*
+
+**⭐ Q: How does build caching work, and how do you optimize a Dockerfile for it?**
+Docker caches each layer; on rebuild, it reuses a cached layer if that instruction *and its inputs* are unchanged. Once a layer's cache is invalidated, every layer after it rebuilds. Optimization: put rarely-changing instructions first (install dependencies) and frequently-changing ones last (copy source code). Classic example — copy `package.json` and run `npm install` *before* copying the rest of the source, so a code change doesn't bust the dependency cache. *Why: this is the #1 Dockerfile optimization question.*
+
+**Q: What's a dangling image and how do you clean up?**
+A dangling image is an untagged layer left over from rebuilds (`<none>:<none>`). `docker image prune` removes them; `docker system prune -a` removes unused images, containers, networks, and build cache. *Why: disk-pressure cleanup — directly relevant to your node-cleanup work.*
+
+**Q: Where does a container's data go, and what happens when it's deleted?**
+By default, data written inside a container lives in its writable layer and is *destroyed* when the container is removed. To persist data, use volumes or bind mounts. *Why: leads into the volumes question and the "why are databases hard in containers" theme.*
+
+---
+
+# PART 2 — DOCKERFILE (in depth)
+
+**⭐ Q: Explain the common Dockerfile instructions.**
+- `FROM` — base image (the starting layer)
+- `WORKDIR` — sets the working directory
+- `COPY` — copies files from build context into the image
+- `ADD` — like COPY but also handles URLs and auto-extracts tarballs (prefer COPY unless you need those)
+- `RUN` — executes a command at *build time* (creates a layer)
+- `ENV` — sets environment variables
+- `EXPOSE` — documents which port the app listens on (doesn't actually publish it)
+- `CMD` — default command at *runtime* (overridable)
+- `ENTRYPOINT` — the fixed executable at runtime
+- `ARG` — build-time variable
+*Why: you need to read and write these fluently.*
+
+**⭐ Q: CMD vs ENTRYPOINT — the difference and how they combine?**
+`ENTRYPOINT` is the fixed executable that always runs. `CMD` provides default arguments that are easily overridden at `docker run`. Common pattern: `ENTRYPOINT ["python", "app.py"]` + `CMD ["--port=8080"]` → runs `python app.py --port=8080`, but you can override the args. If you only use CMD, the whole thing is overridable. *Why: a classic Dockerfile question; people confuse these constantly.*
+
+**Q: `COPY` vs `ADD` — which and why?**
+Both copy files into the image. `ADD` additionally extracts local tarballs and can fetch URLs — but that implicit behavior is surprising and a security risk. Best practice: use `COPY` for plain file copies (explicit, predictable), use `ADD` only when you specifically need tarball extraction. *Why: tests knowledge of best practices.*
+
+**Q: `RUN` vs `CMD` vs `ENTRYPOINT` — build-time vs runtime?**
+`RUN` executes during *build* and bakes the result into a layer (e.g., installing packages). `CMD`/`ENTRYPOINT` define what runs when the *container starts*. So `RUN apt-get install` happens once at build; `CMD ["./server"]` happens every time the container runs. *Why: a common point of confusion.*
+
+**⭐ Q: What's a multi-stage build and why is it important?**
+A Dockerfile with multiple `FROM` stages. You build/compile in a heavy stage with all the build tools, then `COPY --from=builder` only the final artifact into a slim runtime stage. Benefits: dramatically smaller final image, smaller attack surface (no compilers/build tools shipped), faster pulls. Example: compile a Go binary in a `golang` stage, copy just the binary into `alpine` or `scratch`.
+```dockerfile
+FROM golang:1.22 AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o server .
+
+FROM alpine:3.19
+COPY --from=builder /app/server /server
+ENTRYPOINT ["/server"]
+```
+*Why: THE most-asked Dockerfile optimization; expect to explain it.*
+
+**⭐ Q: How do you reduce Docker image size? (list the techniques)**
+Multi-stage builds; slim/minimal base images (`alpine`, `distroless`, `slim`); combine `RUN` commands with `&&` to reduce layers; clean package caches in the *same* layer (`apt-get install ... && rm -rf /var/lib/apt/lists/*`); use `.dockerignore` to avoid copying junk (node_modules, .git) into the build context; remove build dependencies. *Why: image size affects pull speed, storage cost, and attack surface — a frequent question.*
+
+**Q: What's `.dockerignore` and why does it matter?**
+Like `.gitignore` but for the Docker build context — it excludes files from being sent to the daemon and copied into the image (`.git`, `node_modules`, secrets, large test data). Without it, `COPY . .` drags everything in, bloating the image and slowing builds. *Why: easy to forget, real impact; also a security point (don't copy secrets in).*
+
+**⭐ Q: Why shouldn't you run a container as root, and how do you fix it?**
+If a container runs as root and there's a container-escape vulnerability, root in the container can become root on the host. Fix: create and switch to a non-root user in the Dockerfile:
+```dockerfile
+RUN adduser --disabled-password appuser
+USER appuser
+```
+Many security policies and Kubernetes admission controllers reject root containers. *Why: a top container-security question.*
+
+**Q: How do you handle secrets in a Docker build?**
+Never `COPY` secrets in or put them in `ENV` (they persist in image layers and history — `docker history` reveals them). Use BuildKit secret mounts (`--mount=type=secret`) which don't persist in the image, or inject secrets at *runtime* via environment variables / mounted secret files. *Why: a common security mistake interviewers probe.*
+
+**Q: What's the difference between an image built `FROM scratch` vs `FROM alpine` vs `FROM ubuntu`?**
+`scratch` = empty, no OS at all (only works for fully static binaries like Go) — smallest, most secure. `alpine` = ~5MB minimal Linux with a package manager (musl libc — occasional compatibility quirks). `ubuntu/debian` = full-featured but large (~70MB+). Choose the smallest that runs your app. `distroless` (Google) is a popular middle ground — minimal but with libc. *Why: base-image choice affects size, security, and compatibility.*
+
+---
+
+# PART 3 — DOCKER NETWORKING (in depth)
+
+**⭐ Q: What are the Docker network drivers / types?**
+- **bridge** (default) — containers on a private internal network on the host; they talk to each other and reach outside via NAT. Each container gets an internal IP.
+- **host** — the container shares the host's network namespace directly (no isolation, no NAT) — fast, but ports conflict with the host.
+- **none** — no networking at all.
+- **overlay** — spans multiple Docker hosts (for Swarm/multi-host) — containers on different hosts communicate as if on one network.
+- **macvlan** — gives the container its own MAC and appears as a physical device on the network.
+*Why: networking is heavily tested; knowing when to use each is the depth signal.*
+
+**⭐ Q: How do containers on the same bridge network communicate?**
+On a *user-defined* bridge network, Docker provides automatic DNS — containers resolve each other by container name. So `app` can reach `db` at `http://db:5432`. On the *default* bridge, this DNS doesn't work — you'd need `--link` (legacy) or IPs. *Why: this is why Compose works (it creates a user-defined network with name-based DNS) — a key practical point.*
+
+**⭐ Q: What's the difference between `EXPOSE`, `-p`, and `--expose`?**
+`EXPOSE` in the Dockerfile is documentation only — it declares the port the app uses but doesn't publish it. `-p 8080:80` (publish) at `docker run` actually maps host port 8080 to container port 80, making it reachable from outside the host. `-p` is what genuinely exposes a container to the host network. *Why: people confuse EXPOSE with actually publishing — a common gotcha.*
+
+**Q: How does a container reach the internet, and how does outside traffic reach a container?**
+Outbound: on a bridge network, the container's traffic is NAT'd through the host's IP. Inbound: traffic only reaches a container if you publish a port (`-p host:container`), which sets up an iptables DNAT rule on the host forwarding that host port to the container. *Why: explains the full traffic path, ties to your networking knowledge.*
+
+**Q: What is `host.docker.internal`?**
+A special DNS name that resolves to the host machine from inside a container — useful when a container needs to reach a service running on the host. *Why: practical, comes up in local dev scenarios.*
+
+**Q: How does Docker networking relate to Kubernetes networking?**
+Docker's per-host bridge networking is single-host. Kubernetes needs cross-host pod-to-pod networking with every pod getting a routable IP — so it uses CNI plugins (not Docker's bridge) to implement its flat network model. Docker handles the container runtime; the CNI handles the cluster network. *Why: bridges your Docker and Kubernetes knowledge — a nice senior connection.*
+
+---
+
+# PART 4 — VOLUMES & STORAGE
+
+**⭐ Q: Volumes vs bind mounts vs tmpfs?**
+- **Volume** — managed by Docker (`/var/lib/docker/volumes/...`), the preferred way to persist data; portable, backed up easily, decoupled from the host path.
+- **Bind mount** — maps a specific host directory into the container; tight coupling to host filesystem, good for local dev (mounting source code).
+- **tmpfs** — in-memory, never written to disk; for sensitive/temporary data.
+*Why: data persistence is core; volumes are the right default.*
+
+**Q: Why does container data disappear, and how do you persist it?**
+Data in the container's writable layer is destroyed when the container is removed. Mount a volume to persist data beyond the container's life (`docker run -v mydata:/var/lib/postgresql/data`). *Why: explains why stateful apps need volumes.*
+
+**Q: Why are databases tricky to run in containers?**
+Containers are designed to be ephemeral and stateless; databases need durable state, careful volume management, backup/restore, and don't love being killed and rescheduled. You *can* run them with volumes, but in production, managed databases (RDS, Azure SQL) are usually preferred — same reasoning as not running stateful workloads in Kubernetes. *Why: ties to the architecture judgment from your earlier prep.*
+
+---
+
+# PART 5 — DOCKER COMPOSE (in depth)
+
+**⭐ Q: What is Docker Compose and when do you use it?**
+A tool to define and run multi-container applications with a single YAML file (`docker-compose.yml`) and one command (`docker compose up`). It's for *local development and testing* of multi-service apps — defining the services, their networks, volumes, and dependencies declaratively. *Why: tests whether you know its purpose (dev/test) vs Kubernetes (production orchestration).*
+
+**⭐ Q: Walk through a typical docker-compose.yml.**
+```yaml
+services:
+  web:
+    build: ./web              # build from local Dockerfile
+    ports:
+      - "8080:80"             # host:container
+    environment:
+      - DB_HOST=db
+    depends_on:
+      - db
+  db:
+    image: postgres:16
+    environment:
+      - POSTGRES_PASSWORD=secret
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+volumes:
+  dbdata:
+```
+Key parts: `services` (each container), `build` vs `image`, `ports`, `environment`, `depends_on`, `volumes` (named volume for persistence). *Why: expect to read or write one.*
+
+**Q: How do services in Compose communicate with each other?**
+Compose creates a default user-defined bridge network, so services reach each other *by service name* via Docker's built-in DNS. `web` connects to `db` at hostname `db`. No IP hardcoding needed. *Why: this is the practical payoff of user-defined bridge DNS.*
+
+**Q: What does `depends_on` actually do — and what's the catch?**
+`depends_on` controls *startup order* (start `db` before `web`), but it does NOT wait for the dependency to be *ready* — only *started*. So `web` might start before Postgres is accepting connections. The fix: a healthcheck with `condition: service_healthy`, or retry logic in the app. *Why: a classic gotcha — "depends_on doesn't mean ready."*
+
+**Q: Compose vs Kubernetes — when each?**
+Compose: local dev, simple multi-container apps on a single host, quick testing — simple and fast. Kubernetes: production orchestration across many nodes, with scaling, self-healing, rolling updates, service discovery, and high availability. Compose doesn't do multi-node scheduling or self-healing. *Why: tests that you know Compose isn't a production orchestrator.*
+
+**Q: How do you scale a service in Compose?**
+`docker compose up --scale web=3` runs 3 instances of `web`. But there's no built-in load balancing or self-healing like Kubernetes — it's limited. *Why: shows the boundary of Compose's capabilities.*
+
+---
+
+# PART 6 — SCENARIO-BASED QUESTIONS (the interview gold)
+
+**⭐ Scenario 1: "Your container exits immediately after starting. How do you debug?"**
+Check `docker ps -a` (it's in Exited state) → `docker logs <container>` to see why it exited → check the exit code (`docker inspect`). Common causes: the main process crashed on startup (bad config, missing env var, missing dependency), the CMD/ENTRYPOINT is wrong, or the foreground process finished (containers exit when PID 1 exits — e.g., running a non-blocking command). Key insight: a container runs only as long as its main process; if that process exits or runs in the background, the container stops. *Why: extremely common; tests the "container = one foreground process" mental model.*
+
+**⭐ Scenario 2: "A container is consuming too much memory and getting killed. Walk me through it."**
+The container exceeded its memory limit and was OOMKilled (exit 137). Check `docker stats` for live memory usage, `docker inspect` for the limit and the OOMKilled flag, and the app logs. Causes: memory leak in the app, limit set too low, or a workload spike. Fix: find the leak (heap profiling), or right-size the limit. This maps exactly to Kubernetes OOMKilled. *Why: ties to your real incident story; shows the container/cgroup memory relationship.*
+
+**Scenario 3: "Two containers can't talk to each other. How do you debug?"**
+Are they on the *same* network? (`docker network inspect <net>` to see attached containers). Are you using the default bridge (no name DNS) instead of a user-defined network? Use the container/service *name*, not localhost (localhost inside a container is the container itself, not other containers). Test from inside: `docker exec -it app ping db` or `curl db:5432`. *Why: tests Docker networking understanding; the "localhost is the container itself" point catches many people.*
+
+**Scenario 4: "Your Docker image is 1.2GB. How do you make it smaller?"**
+Multi-stage build (ship only the artifact, not the build tools); switch to a slim/alpine/distroless base; combine RUN layers and clean package caches in the same layer; add a `.dockerignore`; remove unnecessary dependencies. Check what's taking space with `docker history <image>` to see per-layer size. *Why: optimization scenario; `docker history` is the diagnostic tool that impresses.*
+
+**Scenario 5: "A build that used to take 2 minutes now takes 10. The Dockerfile didn't change much. Why?"**
+Likely the cache is being busted early. If you moved a `COPY . .` before the dependency install, or a frequently-changing file is copied before `RUN npm install`, every build re-runs the expensive install. Fix: reorder so dependencies are installed before source is copied. Check with `docker build` output — "Using cache" vs rebuilding tells you where the cache breaks. *Why: tests deep understanding of layer caching.*
+
+**Scenario 6: "A container works on your machine but fails in production. What could differ?"**
+Different architecture (built on ARM Mac, running on x86 — need multi-arch builds or `--platform`); different env variables/config; missing mounted volumes or secrets; network/DNS differences; the image tag is `latest` and production pulled a different version; resource limits in production that don't exist locally (OOM/CPU throttle). *Why: the classic "works on my machine" — tests breadth of thinking about environment differences.*
+
+**Scenario 7: "How would you debug a running container you can't shell into (no bash/shell in the image)?"**
+Distroless/scratch images have no shell. Options: `docker exec` won't help. Use `docker logs`, `docker inspect`, `docker stats`. For deeper debugging, attach an ephemeral debug container sharing the target's namespaces (`docker run --pid container:<target> --network container:<target> nicolaka/netshoot`) to get tools without modifying the image. In Kubernetes this is `kubectl debug` (ephemeral containers). *Why: advanced — distroless debugging is a real modern problem.*
+
+---
+
+# PYTHON (for SRE/DevOps)
+
+## Beginner
+
+**Q: List vs tuple vs dict vs set — when each?**
+List `[]` = ordered, mutable, allows duplicates (a sequence of things). Tuple `()` = ordered, *immutable* (fixed records, can be dict keys). Dict `{}` = key-value pairs, fast lookup by key. Set = unordered, unique values, fast membership testing. *Why: "I need to count unique errors" → set or dict; "I need fast lookup" → dict. Picking the right structure is what interviews probe.*
+
+**Q: How do you read a file safely?**
+`with open("file.txt") as f: for line in f: ...`. The `with` block auto-closes the file even if an error occurs. Iterating line-by-line streams the file instead of loading it all into memory. *Why: the `with` context manager is the correct, leak-free pattern; reading `f.read()` on a huge log file is a memory mistake interviewers catch.*
+
+**Q: Difference between `==` and `is`?**
+`==` compares values (are they equal?). `is` compares identity (are they the same object in memory?). Use `==` for value checks; use `is` only for `None`, `True`, `False` (`if x is None`). *Why: `if x is "string"` is a subtle bug — interviewers test this.*
+
+**⭐ Q: How do you handle errors in Python?**
+`try/except`: `try: risky() except SpecificError as e: handle(e)`. Catch *specific* exceptions, not bare `except:` (which hides real bugs and catches things like KeyboardInterrupt). Use `finally:` for cleanup that must always run, or `else:` for code that runs only if no exception. *Why: robust error handling is what separates a script that fails gracefully from one that crashes mid-run — core for ops automation.*
+
+## Intermediate
+
+**⭐ Q: How would you parse a log file and count error types?**
+Stream the file line-by-line, use a `collections.Counter` to tally:
+```python
+from collections import Counter
+errors = Counter()
+with open("app.log") as f:
+    for line in f:
+        if "ERROR" in line:
+            errors[extract_type(line)] += 1
+for err, count in errors.most_common(10):
+    print(count, err)
+```
+*Why: this is THE canonical ops Python task. `Counter.most_common()` is the tool. Your log-analyzer script does exactly this.*
+
+**Q: How do you parse JSON in Python?**
+`import json`. `json.loads(string)` parses a JSON string to a dict; `json.load(file)` reads from a file object; `json.dumps(obj)` serializes back to a string. *Why: APIs and structured logs are JSON; this is why you reach for Python over Bash for structured data.*
+
+**⭐ Q: How do you make an HTTP API call in Python?**
+Using `requests`:
+```python
+import requests
+resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+resp.raise_for_status()      # raises on 4xx/5xx
+data = resp.json()
+```
+Always set a `timeout` (without it, a hung server hangs your script forever) and check the status. *Why: calling the Kubernetes API, cloud APIs, webhooks — and the `timeout` + `raise_for_status` details show production awareness.*
+
+**Q: How do you run a shell command from Python and capture output?**
+`subprocess.run`:
+```python
+result = subprocess.run(["kubectl", "get", "pods"], capture_output=True, text=True, check=True, timeout=30)
+print(result.stdout)
+```
+Pass args as a *list* (not a string) to avoid shell-injection, use `check=True` to raise on failure, `text=True` for string output, and a `timeout`. *Why: ops scripts often wrap CLI tools; the list-not-string detail is a security signal.*
+
+**Q: What's a list comprehension and when should you use it?**
+A concise way to build a list: `[x*2 for x in items if x > 0]`. Readable for simple transforms/filters. But don't cram complex logic into one — if it needs multiple conditions or side effects, use a regular loop for readability. *Why: shows Pythonic style without overusing it.*
+
+**Q: Difference between `append()` and `extend()`? Mutable default argument trap?**
+`append(x)` adds one item; `extend([a,b])` adds each item of an iterable. The trap: `def f(items=[])` — the default list is created *once* and shared across calls, so it accumulates. Use `def f(items=None): items = items or []`. *Why: the mutable-default-argument bug is a classic Python gotcha interviewers love.*
+
+## Advanced
+
+**Q: What's the difference between a list and a generator, and why does it matter for large data?**
+A list holds all items in memory at once. A generator (`yield`, or `(x for x in ...)`) produces items lazily, one at a time, using almost no memory. For processing a huge log file or streaming API results, a generator avoids loading everything into RAM. *Why: memory-efficiency on large data is a real ops concern — processing a 10GB log shouldn't OOM your script.*
+
+**⭐ Q: How do you write a script that's safe to run repeatedly (idempotent) and handles partial failure?**
+Check state before acting (does the resource already exist? skip it). Wrap each operation in try/except so one failure doesn't abort everything. Log what was done. For external calls, add retries with backoff. Make operations reversible or checkpoint progress so a re-run resumes rather than duplicates. *Why: idempotency is core to automation — a remediation script must be safe to re-run after a partial failure.*
+
+**Q: How do you implement retries with backoff?**
+```python
+import time
+for attempt in range(max_retries):
+    try:
+        return call_api()
+    except TransientError:
+        if attempt == max_retries - 1:
+            raise
+        time.sleep(2 ** attempt)   # exponential backoff
+```
+Add jitter (randomness) in production to avoid thundering-herd. *Why: directly maps to the resilience patterns SRE roles ask about — retries with backoff and jitter.*
+
+**Q: What are context managers and how do you write one?**
+They manage setup/teardown automatically (the `with` statement). Built-in for files, locks, connections. You can write your own with `@contextmanager`:
+```python
+from contextlib import contextmanager
+@contextmanager
+def timer():
+    start = time.time()
+    yield
+    print(f"took {time.time()-start:.2f}s")
+```
+*Why: ensures cleanup (closing connections, releasing locks) even on error — the Python equivalent of Bash's `trap`.*
+
+**Q: How do you handle secrets and config in a Python script?**
+Never hardcode. Read from environment variables (`os.environ["TOKEN"]` or `os.getenv` with a default), or a secret manager / mounted secret file. Keep config separate from code. Don't log secrets. *Why: security awareness; same principle as everywhere — secrets come from the environment at runtime, not the source.*
+
+**Q: What's the difference between `os.environ.get()` and `os.environ[]`?**
+`os.environ["KEY"]` raises KeyError if the variable is missing (fail-fast — good when the secret is required). `os.environ.get("KEY", default)` returns a default if missing (graceful — good for optional config). *Why: choosing the right one shows you think about "is this required or optional?"*
+
+**Q: When should you NOT use Python, and reach for Bash instead?**
+For simple command orchestration — chaining a few CLI commands, basic file operations, glue between tools — Bash is lighter and more direct. Reach for Python when you need structured data parsing (JSON/YAML), complex logic, error handling, API calls, or maintainability. *Why: judgment about the right tool is a senior signal — it's not "Python for everything."*
+
+---
+
+# Connecting to YOUR scripts
+
+Your log-analyzer Python script is the perfect interview artifact. Be ready to explain:
+
+- **Why Python, not Bash** → "It parses structured log data and aggregates error patterns — `json` parsing and `Counter` make that clean; doing it in Bash would be fragile."
+- **`Counter` + `most_common`** → "tallies error signatures and surfaces the top ones instantly, instead of scrolling thousands of lines."
+- **The normalize/regex step** → "strips out IDs, GUIDs, timestamps so similar errors group together — otherwise every line looks unique."
+- **Streaming the file** → "I iterate line-by-line so it doesn't load a huge log into memory."
+- **What you'd improve** → "add argparse for flexibility, handle malformed JSON gracefully, maybe output to a structured format for dashboards."
+
+---
+
+# Drilling priority
+
+The ⭐ ones are what ops/SRE Python interviews actually hit:
+- **Error handling** (try/except, specific exceptions) — guaranteed
+- **Parse a log + count with Counter** — the canonical ops task
+- **HTTP API call with requests** (timeout, raise_for_status) — very common
+- **Idempotent/safe-to-rerun automation** — the senior-level concept
+
+If you can write a log-parser, make a safe API call with error handling, and explain idempotency — plus walk through your own script — you're solidly mid-level on Python for SRE/DevOps. They're not testing whether you can implement quicksort; they're testing whether you can automate ops tasks safely.
+
+---
+
+# BASH
+
+## Beginner
+
+**Q: What's the shebang line and why does it matter?**
+`#!/bin/bash` (or `#!/usr/bin/env bash`) on line 1 tells the system which interpreter runs the script. Without it, the script runs in whatever shell invoked it, which may not be Bash — and Bash-specific syntax (arrays, `[[ ]]`) breaks under plain `sh`. *Why: a script that works for you but breaks on a server is often a shebang/shell mismatch.*
+
+**Q: Single quotes vs double quotes?**
+Single quotes `'...'` are literal — no variable expansion. Double quotes `"..."` allow variable and command expansion (`$var`, `$(cmd)`) but preserve spaces. Rule: use double quotes around variables (`"$var"`) to avoid word-splitting; use single quotes for literal strings. *Why: unquoted variables are the #1 source of Bash bugs.*
+
+**⭐ Q: Why must you quote variables — `"$var"` instead of `$var`?**
+If a variable contains spaces or is empty, unquoted use causes word-splitting and globbing. `rm $file` where `file="my file.txt"` tries to delete two files, "my" and "file.txt". `"$file"` treats it as one. With an empty variable, `[ $x = "y" ]` becomes `[ = "y" ]` — a syntax error. *Why: this is the single most common Bash mistake, and interviewers love catching it.*
+
+**Q: How do you read command-line arguments?**
+`$1`, `$2`, etc. for positional args; `$0` is the script name; `$#` is the count; `$@` is all args; `$*` is all args as one string. *Why: every real script takes input.*
+
+**Q: What's the difference between `>`, `>>`, and `2>`?**
+`>` overwrites stdout to a file, `>>` appends, `2>` redirects stderr, `&>` (or `2>&1`) redirects both. `2>&1` means "send stderr to wherever stdout is going." *Why: log handling in scripts; `2>&1` order matters and trips people up.*
+
+## Intermediate
+
+**⭐ Q: What does `set -euo pipefail` do and why use it in every production script?**
+`-e` = exit immediately if any command fails. `-u` = error on undefined variables (catches typos). `-o pipefail` = a pipeline fails if *any* command in it fails, not just the last. Without these, Bash silently continues after errors — dangerous for ops scripts that might, say, `cd` to a directory that doesn't exist and then `rm -rf *` in the wrong place. *Why: the #1 "do you write safe scripts" signal. Always lead with this in any script you show.*
+
+**Q: Difference between `[ ]` and `[[ ]]`?**
+`[ ]` is the POSIX test command — works everywhere but needs careful quoting and uses `-a`/`-o` for and/or. `[[ ]]` is a Bash keyword — safer (no word-splitting issues), supports `&&`/`||`, pattern matching, and regex (`=~`). Prefer `[[ ]]` in Bash scripts. *Why: shows you know the modern, safer construct.*
+
+**Q: How do you check if a command succeeded?**
+Check `$?` (exit code of the last command — 0 = success, non-zero = failure), or use it directly: `if command; then ... fi`. `&&` runs the next only on success, `||` runs the next only on failure. *Why: error handling is what makes a script production-grade.*
+
+**Q: How do you loop over files or lines safely?**
+Over files: `for f in *.log; do ...; done`. Over lines in a file: `while IFS= read -r line; do ...; done < file` — `IFS=` preserves whitespace, `-r` prevents backslash mangling. *Why: the naive `for line in $(cat file)` breaks on spaces — interviewers test if you know the safe pattern.*
+
+**Q: What's command substitution and which syntax should you use?**
+Capturing a command's output into a variable: `result=$(command)`. Use `$(...)` not backticks `` `...` `` — `$(...)` nests cleanly and is more readable. *Why: backticks are legacy; `$()` signals modern Bash.*
+
+**Q: How do you give a variable a default value?**
+`${var:-default}` uses "default" if var is unset or empty. `${var:=default}` also assigns it. `${var:?error message}` exits with an error if unset. *Why: makes scripts robust to missing input — `NAMESPACE="${1:-default}"`.*
+
+## Advanced
+
+**⭐ Q: How do you handle errors and cleanup in a script?**
+Use `trap` to run cleanup on exit or error: `trap 'rm -f "$tmpfile"' EXIT` runs the cleanup whenever the script exits, success or failure. `trap 'echo "failed at line $LINENO"' ERR` catches errors. Combined with `set -e`, this ensures temp files/locks get cleaned up even when the script dies unexpectedly. *Why: shows you write scripts that don't leave garbage behind on failure — a real production concern.*
+
+**⭐ Q: How do you prevent a script from running twice simultaneously?**
+Use a lock with `flock`: `exec 200>/var/lock/myscript.lock; flock -n 200 || exit 1`. This acquires an exclusive lock on a file descriptor; if another instance holds it, `-n` (non-blocking) makes this one exit immediately. *Why: critical for cron jobs — without locking, a slow run can overlap the next scheduled run and corrupt state. This is exactly the improvement I'd mention for the disk-cleanup script.*
+
+**Q: How do you debug a Bash script?**
+`bash -x script.sh` (or `set -x` inside) prints each command as it executes with expanded variables — you see exactly what ran. `set -v` prints lines as read. Combine with `set -euo pipefail` to fail fast at the problem. *Why: tests whether you can troubleshoot your own scripts, not just write them.*
+
+**Q: What's the difference between running a script with `./script.sh`, `bash script.sh`, and `source script.sh`?**
+`./script.sh` and `bash script.sh` run it in a *new subshell* — variables set inside don't affect your current shell. `source script.sh` (or `. script.sh`) runs it in the *current shell* — so it can change your environment (used for sourcing config/env files). *Why: explains "why didn't my variable persist?" confusion.*
+
+**Q: How do you process a large file efficiently in Bash, and when should you NOT use Bash?**
+For line processing use streaming tools — `grep`, `awk`, `sed` — which process line-by-line without loading the whole file into memory. `awk` is great for column extraction and aggregation. But when you need structured data (JSON), complex logic, or maintainability, switch to Python — parsing JSON or doing real data manipulation in Bash is painful and fragile. *Why: shows judgment about the right tool — exactly why your log-analyzer is Python, not Bash.*
+
+**Q: What does `xargs` do and why is it useful?**
+`xargs` builds and runs commands from stdin input — e.g., `find . -name "*.log" | xargs rm` deletes all found files. It batches arguments efficiently rather than running the command once per item. Use `xargs -0` with `find -print0` to handle filenames with spaces safely. *Why: common in cleanup/automation scripts; the `-0` safety detail shows depth.*
+
+**Q: How do you make a script read configuration or secrets safely?**
+Source a config file (`source config.env`) for non-secrets. For secrets, never hardcode — read from environment variables injected at runtime, or pull from a secret manager. In a script, avoid echoing secrets (they end up in logs/`set -x` output); use `set +x` around the sensitive section. *Why: security-awareness in scripting is a senior signal.*
+
+---
+
+# Walking through YOUR scripts (interview-critical)
+
+Since you have real scripts, interviewers may say "show me one and explain it." For your **disk-cleanup script**, be ready to explain:
+
+- **`set -euo pipefail`** → "fails fast so it can't continue after an error and do damage"
+- **The threshold check first** → "it's a no-op when there's nothing to clean, avoids unnecessary work"
+- **`crictl` not `docker`** → "AKS uses containerd, so the runtime CLI is crictl"
+- **truncate vs delete on logs** → "deleting a log a process has open doesn't free space until the handle closes; truncate frees it immediately"
+- **What you'd improve** → "add `flock` to prevent concurrent runs, add a `--dry-run` flag, and push freed-space metrics to Prometheus"
+
+That last point — *what you'd improve* — is gold. It shows you think about production-hardening, not just "it works on my machine."
+
+---
+
+# Drilling priority
+
+The ⭐ ones are what interviews actually hit:
+- `set -euo pipefail` (why) — guaranteed question if you discuss scripting
+- Quoting variables (`"$var"`) — the classic gotcha
+- `trap` for cleanup — separates basic from production-grade
+- `flock` for locking — senior-level awareness
+- When NOT to use Bash (→ Python) — shows judgment
+
+If you can fluently explain those five plus walk through your own scripts, you're solidly mid-level on Bash for any SRE/DevOps interview.
+
+---
+
+# LINUX
+
+## Beginner
+
+**Q: What's the difference between a process and a thread?**
+A process is an independent program with its own memory space. A thread is a lighter unit of execution *inside* a process, sharing that process's memory. Threads are cheaper to create and share data easily; processes are isolated and safer. *Why it matters: explains why a multi-threaded app can leak/corrupt shared memory but multiple processes can't touch each other's.*
+
+**Q: What does `chmod 755` mean?**
+Permissions as three digits: owner/group/others, where read=4, write=2, execute=1. 755 = owner rwx (7), group r-x (5), others r-x (5). *Why: file permission questions are common, and 755 (executables/dirs) and 644 (regular files) are the two you'll see most.*
+
+**Q: Difference between a hard link and a soft (symbolic) link?**
+A hard link is another name pointing to the same inode (same actual data) — deleting the original doesn't remove the data. A soft link is a pointer to a path — if the original is deleted, the link breaks. *Why: explains weird "file deleted but still there" behavior.*
+
+**Q: What's the difference between `/etc`, `/var`, `/tmp`, `/proc`?**
+`/etc` = config files. `/var` = variable data (logs, caches). `/tmp` = temporary files (often cleared on reboot). `/proc` = a virtual filesystem exposing kernel/process info (not real files on disk). *Why: `/proc/<pid>/` is a debugging goldmine, and `/var` filling up is a common incident.*
+
+## Intermediate
+
+**⭐ Q: `top` shows high load average but low CPU usage. What's going on?**
+Load average counts processes that are *runnable* AND those in *uninterruptible sleep* (D-state, usually blocked on I/O). High load + low CPU = processes waiting on I/O (disk, NFS), not CPU saturation. Check the `wa` (I/O wait) column and `iostat`. *Why: classic SRE question — tests whether you understand load avg isn't just CPU.*
+
+**⭐ Q: `df` says the disk is full but `du` doesn't add up. Why?**
+A process is holding an open file handle to a file that was deleted. The directory entry is gone (so `du`, which walks the tree, doesn't count it), but the blocks aren't freed until the process closes the handle (so `df`, which reads free blocks, still shows them used). Find it: `lsof +L1` or `lsof | grep deleted`. Fix: restart the process or truncate the open fd. *Why: extremely common real incident; tests deep understanding of how the filesystem works.*
+
+**Q: How do you find what's using a port? What's eating memory?**
+Port: `ss -tlnp | grep :8080` (shows the listening process + PID). Memory: `ps aux --sort=-rss | head` or `top` sorted by RES. *Why: every troubleshooting scenario starts with "what's running and what's it consuming."*
+
+**Q: What's the difference between `kill`, `kill -9`, and what signals do they send?**
+`kill` sends SIGTERM (15) — graceful, asks the process to clean up and exit. `kill -9` sends SIGKILL — forceful, the kernel terminates it immediately, no cleanup. Always try SIGTERM first; SIGKILL can leave things in a bad state (open files, locks). *Why: tests whether you understand graceful vs forced shutdown — directly relevant to pod termination too.*
+
+**Q: What's a zombie process and a defunct process?**
+A zombie (defunct) is a process that has finished but whose parent hasn't read its exit status yet, so it stays in the process table. They consume no resources except a table entry. Too many means the parent isn't reaping children properly. *Why: shows up in process-table questions.*
+
+**Q: How do you schedule a recurring job? Difference between cron and systemd timers?**
+Cron: `crontab -e`, classic time-based scheduler. Systemd timers: more powerful, integrated with systemd units, better logging via journald, can handle dependencies and missed runs (`Persistent=true`). *Why: automation/toil questions; modern systems prefer systemd timers.*
+
+## Advanced
+
+**⭐ Q: RSS vs VSZ vs PSS — what's the difference and which matters for OOM?**
+VSZ = total virtual address space the process could use (includes unmapped/reserved — misleadingly large). RSS = resident physical RAM in use, but counts shared pages (like libc) fully in every process. PSS = proportional set size, splits shared pages fairly — the most accurate "real cost." For OOM concerns, RSS is the practical number the kernel acts on. *Why: tests real memory understanding; summing RSS across processes can exceed total RAM because of double-counted shared pages.*
+
+**⭐ Q: How do you investigate why a process was OOM-killed?**
+`dmesg -T | grep -i oom` or `journalctl -k | grep -i oom` shows the OOM killer's victim, its memory usage, and oom_score. The kernel kills the highest oom_score process (influenced by memory use + oom_score_adj). In containers, exceeding the cgroup memory limit triggers a cgroup-OOM (exit 137); node-wide exhaustion is a system OOM. *Why: directly maps to Kubernetes OOMKilled — your incident story.*
+
+**Q: A process is hung. How do you find what it's blocked on without killing it?**
+`strace -p <pid>` shows the syscall it's stuck in (`read` on a socket = network wait, `futex` = lock contention, `fsync` = disk). `cat /proc/<pid>/stack` shows the kernel stack; `/proc/<pid>/wchan` shows the sleeping function. `lsof -p <pid>` shows open files/sockets. *Caveat: strace pauses the process on every syscall — heavy on production, use briefly.*
+
+**Q: What's a file descriptor and what causes "too many open files"?**
+An FD is a kernel handle to an open file or socket. Each process has a limit (`ulimit -n`). "Too many open files" = the process hit that limit, usually from an FD leak (not closing connections/files) or genuinely high concurrency with a low limit. Check: `ls /proc/<pid>/fd | wc -l`. Fix: raise the limit (`LimitNOFILE` in systemd) and fix the leak. *Why: a service hitting this stops accepting new connections while still "running" — a confusing incident.*
+
+**Q: What is a cgroup and a namespace, and how do they relate to containers?**
+Namespaces isolate *what a process can see* (its own PID space, network, mounts, users) — that's container isolation. cgroups limit *what a process can use* (CPU, memory, I/O) — that's container resource limits. Together they're the kernel primitives that *make* containers; Docker/containerd just orchestrate them. *Why: shows you understand containers aren't magic — they're Linux kernel features.*
+
+---
+
+# NETWORKING
+
+## Beginner
+
+**Q: Walk through what happens when you type a URL and hit enter.**
+DNS resolves the domain to an IP → TCP connection established (3-way handshake) → TLS handshake if HTTPS → HTTP request sent → server responds → browser renders. *Why: the classic opener; tests end-to-end mental model.*
+
+**Q: TCP vs UDP — when each?**
+TCP is connection-oriented, reliable, ordered (handshake, acknowledgments, retransmission) — used for HTTP, databases, anything needing reliability. UDP is connectionless, fast, no guarantees — used for DNS, streaming, VoIP where speed beats reliability. *Why: foundational; explains why DNS (UDP) behaves differently from HTTP (TCP).*
+
+**Q: What's the difference between a public and private IP?**
+Public IPs are globally routable on the internet. Private IPs (10.x, 172.16-31.x, 192.168.x) are for internal networks and not routable on the internet — they reach out via NAT. *Why: underpins VPC/subnet design.*
+
+**⭐ Q: What does DNS do and what are the common record types?**
+DNS resolves names to IPs. Records: A (name→IPv4), AAAA (name→IPv6), CNAME (alias to another name), MX (mail), TXT (verification/SPF), NS (nameservers). *Why: DNS issues cause a huge share of incidents; knowing record types is table stakes.*
+
+## Intermediate
+
+**⭐ Q: Explain the TCP 3-way handshake.**
+SYN (client → server, "I want to connect") → SYN-ACK (server → client, "ok, and I want to connect back") → ACK (client → server, "confirmed"). Now the connection is established. *Why: connection-establishment issues (SYN floods, half-open connections) trace back to this.*
+
+**⭐ Q: Connection refused vs connection timed out — what does each tell you?**
+Refused = the packet reached the host and was actively rejected (RST returned) — nothing listening on that port, service down, or wrong port. An app/host issue. Timed out = no response at all — a firewall/security group silently dropping packets, wrong IP, or a routing problem. A network issue. *Why: the single most useful diagnostic distinction — it tells you which layer to investigate.*
+
+**Q: What's the difference between a load balancer at L4 vs L7?**
+L4 routes on IP/port, fast, no payload inspection. L7 routes on HTTP content (host, path, headers), enables TLS termination, path routing, rate limiting. *Why: cloud LB design questions.*
+
+**Q: Walk through a TLS handshake.**
+Client hello (supported ciphers, TLS version) → server hello + certificate → client verifies the cert chain against trusted CAs → key exchange (ECDHE) creates a shared session key → encrypted communication begins. TLS 1.3 reduced this to one round trip. *Why: HTTPS/cert issues are common; tests whether you understand what "TLS error" actually means.*
+
+**Q: What's NAT and why is it needed?**
+Network Address Translation maps private IPs to a public IP for internet access. A NAT gateway lets many private resources share one public IP for outbound traffic, tracking connections so responses return correctly. *Why: explains how private subnets reach the internet.*
+
+**Q: What are the main HTTP status code categories?**
+2xx success, 3xx redirect, 4xx client error (400 bad request, 401 unauthorized, 403 forbidden, 404 not found, 429 rate-limited), 5xx server error (500 internal, 502 bad gateway, 503 unavailable, 504 gateway timeout). *Why: 5xx debugging is core SRE; knowing 502 vs 503 vs 504 points you to different causes (502 = bad upstream response, 503 = no capacity, 504 = upstream too slow).*
+
+## Advanced
+
+**⭐ Q: What's the difference between 502, 503, and 504, and what does each suggest?**
+502 Bad Gateway = the proxy/LB got an invalid response from the upstream (upstream crashed or returned garbage). 503 Service Unavailable = no healthy backends / overloaded / nothing to route to. 504 Gateway Timeout = the upstream took too long to respond (slow backend, exhausted connection pool). *Why: in an incident, the specific 5xx code immediately narrows the cause — this is a favorite SRE drill.*
+
+**⭐ Q: What is conntrack and how does it cause production incidents?**
+conntrack is the Linux kernel's connection-tracking table that remembers NAT mappings so return traffic routes correctly. It has a max size; under high connection churn it fills up and new connections get dropped — `dmesg` shows "nf_conntrack: table full, dropping packet," and you see intermittent failures that look like app bugs. Fix: raise `nf_conntrack_max`, reduce churn with connection pooling/keepalive. *Why: a sneaky, high-level incident that separates people who've actually run busy production systems.*
+
+**Q: What's the MTU and how does it cause mysterious failures?**
+MTU is the max packet size a link can carry (typically 1500 bytes). In overlay networks (VXLAN adds ~50 bytes of header), if the pod MTU isn't lowered, large packets get fragmented or dropped while small ones succeed. Classic symptom: TLS handshake works (small packets), then the connection hangs on the first large payload. Diagnose: `ping -M do -s <size>` to find where it breaks. *Why: one of the hardest-to-diagnose networking issues; impressive if you know it.*
+
+**Q: How does HTTP keep-alive / connection pooling improve reliability and performance?**
+Keep-alive reuses a TCP connection for multiple requests instead of opening a new one each time. This avoids repeated handshakes (lower latency), reduces conntrack churn, and prevents port/FD exhaustion under high load. Connection pooling on the client side does the same for backend calls. *Why: connects to conntrack exhaustion and the resilience patterns SRE roles ask about.*
+
+**Q: What's the difference between TCP and a reverse proxy / forward proxy?**
+A forward proxy sits in front of *clients* (outbound — e.g., a corporate proxy filtering employee traffic). A reverse proxy sits in front of *servers* (inbound — e.g., nginx/LB terminating TLS, routing, caching). *Why: clarifies LB/ingress architecture questions.*
+
+**Q: How would you debug high latency to an external API from a server/pod?**
+Break it down by phase with `curl -w` timing: `time_namelookup` (DNS slow?), `time_connect` (TCP/network slow?), `time_appconnect` (TLS slow?), `time_starttransfer` (server processing — TTFB), `time_total`. This isolates exactly which phase is slow — DNS, network, TLS, or the server itself. Then check if it's your host, the network path (`mtr`/`traceroute`), or the external service. *Why: a structured latency-debugging answer is exactly what SRE interviews want.*
+
+---
 ### Cloud Networking & Infra Q&A Set
 
 Same format as before: question, concise model answer, difficulty. Azure-primary since that's your platform. Active recall — cover the answer, say it out loud, check.
