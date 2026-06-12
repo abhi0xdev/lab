@@ -1,3 +1,472 @@
+---
+
+# PART 1 — GITHUB ACTIONS
+
+## Basics
+
+**⭐ Q: What is GitHub Actions and what are its core building blocks?**
+A CI/CD platform built into GitHub. Building blocks: a **workflow** (a YAML file in `.github/workflows/` triggered by events), made of **jobs** (run on runners, parallel by default), made of **steps** (individual commands or actions). An **action** is a reusable unit of code (from the marketplace or your own). A **runner** is the machine that executes a job. *Why: foundational vocabulary; you need to read/write these.*
+
+```yaml
+name: build-and-deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest        # the runner
+    steps:
+    - uses: actions/checkout@v4   # an action
+    - name: Build image           # a step
+      run: docker build -t app:${{ github.sha }} .
+```
+
+**⭐ Q: What's a runner — GitHub-hosted vs self-hosted?**
+The machine that executes jobs. **GitHub-hosted** = GitHub provisions a fresh VM per job (clean, managed, but limited and runs on GitHub's infra). **Self-hosted** = your own machines (you manage them) — used when you need access to private networks (e.g., a private AKS cluster), custom hardware, or more control. Self-hosted runners must be secured carefully since they persist and can access your infra. *Why: tests practical knowledge; self-hosted security is a senior point.*
+
+**Q: What are common triggers (`on:`)?**
+`push`, `pull_request`, `schedule` (cron), `workflow_dispatch` (manual), `release`, `workflow_call` (reusable workflows). Filters by branch, path, tag. *Why: tests workflow design.*
+
+## Intermediate
+
+**⭐ Q: Where do secrets live in GitHub Actions and how does a job access them?**
+In encrypted **GitHub Secrets** (repo, environment, or org level). The runner gets them injected as masked environment variables at runtime, scoped to the job, and masked in logs. For cloud auth, the modern best practice is **OIDC federation** — the runner requests a short-lived token from the cloud provider (Azure/AWS) instead of storing long-lived credentials as secrets. *Why: a guaranteed CI/CD security question; OIDC > stored secrets is the senior answer.*
+
+**⭐ Q: Why is OIDC better than storing cloud credentials as secrets?**
+Stored credentials (a service principal secret) are long-lived — if leaked, they're valid until rotated, and rotation is manual toil. OIDC issues a **short-lived token** per workflow run, scoped to specific permissions, with no secret stored anywhere. If a run is compromised, the token expires in minutes. It eliminates the "leaked long-lived credential" risk entirely. *Why: directly relevant to securing pipelines; a strong security signal.*
+
+**Q: What are environments and protection rules?**
+GitHub **Environments** (dev/staging/prod) can have protection rules: required reviewers (manual approval gate before deploying to prod), wait timers, and environment-scoped secrets. This is how you add an approval gate before production. *Why: ties to your resume's "approval gates"; tests deployment safety.*
+
+**Q: How do you pass data between jobs and steps?**
+Within a job, steps share the filesystem and can use step outputs. Between jobs, use `needs:` (job dependency) and job `outputs`, or **artifacts** (`actions/upload-artifact` / `download-artifact`) to pass files. Jobs are isolated by default (different runners), so you must explicitly pass data. *Why: tests workflow structure understanding.*
+
+**Q: What's a matrix build?**
+Run the same job across multiple configurations in parallel (e.g., test against Node 18, 20, 22, or multiple OSes) using a `strategy.matrix`. *Why: efficiency/testing question.*
+
+## Advanced
+
+**⭐ Q: What are the security risks in GitHub Actions and how do you mitigate them?**
+- **Untrusted action code** — pin actions to a full commit SHA (not a moving tag like `@v4`) so a compromised tag can't inject malicious code.
+- **`pull_request_target`** — runs with secrets access on PRs from forks; dangerous, can leak secrets. Avoid or handle carefully.
+- **Script injection** — untrusted input (PR titles, branch names) interpolated into `run:` can execute arbitrary code; sanitize or use env vars instead of direct interpolation.
+- **Over-privileged `GITHUB_TOKEN`** — set `permissions:` to least-privilege (default to read-only, grant write only where needed).
+- **Self-hosted runner compromise** — don't use self-hosted runners on public repos; isolate them.
+*Why: a senior CI/CD security question; pinning to SHA and least-privilege tokens are the key mitigations.*
+
+**Q: What's a reusable workflow vs a composite action?**
+A **reusable workflow** (`workflow_call`) lets one workflow call another — for sharing whole pipelines across repos. A **composite action** bundles multiple steps into one reusable action. Both reduce duplication; reusable workflows are higher-level (jobs), composite actions are lower-level (steps). *Why: tests how you scale CI/CD across an org.*
+
+**Q: How do you make pipelines faster?**
+Cache dependencies (`actions/cache` for npm/pip/Docker layers), use matrix parallelism, split into parallel jobs, use `paths:` filters to skip unaffected runs, and use Docker layer caching for builds. *Why: optimization question.*
+
+---
+
+# PART 2 — HELM
+
+## Basics
+
+**⭐ Q: What is Helm and why do we use it?**
+Helm is the package manager for Kubernetes. A **chart** is a package of templated Kubernetes manifests. The problem it solves: raw K8s YAML is static and duplicated — you'd copy-paste the same Deployment/Service/Ingress across dev/staging/prod, changing only a few values. Helm **templates** the manifests and injects environment-specific **values**, so you maintain one chart and deploy it everywhere with different `values.yaml`. It also versions releases and enables rollback. *Why: the "why Helm" question — templating + values + release management is the answer.*
+
+**⭐ Q: What are the core Helm concepts — chart, values, release, template?**
+- **Chart** — the package (templates + default values + metadata).
+- **Templates** — K8s manifests with Go templating placeholders (`{{ .Values.replicaCount }}`).
+- **Values** — the inputs (`values.yaml`) that fill the templates; overridable per environment.
+- **Release** — a deployed instance of a chart in a cluster (Helm tracks its version/history).
+*Why: foundational Helm vocabulary.*
+
+```yaml
+# templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  replicas: {{ .Values.replicaCount }}    # injected from values.yaml
+  template:
+    spec:
+      containers:
+      - name: app
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+```
+```yaml
+# values.yaml
+replicaCount: 3
+image:
+  repository: myacr.azurecr.io/app
+  tag: v1.2.3
+```
+
+## Intermediate / Advanced
+
+**Q: What's the structure of a Helm chart?**
+`Chart.yaml` (metadata — name, version), `values.yaml` (default values), `templates/` (the templated manifests), `templates/_helpers.tpl` (reusable template snippets), `charts/` (dependency subcharts). *Why: tests hands-on chart knowledge.*
+
+**Q: How do you override values per environment?**
+Multiple ways: separate values files (`helm install -f values-prod.yaml`), `--set key=value` on the command line, or layered values (base + environment overlay). Later files/flags override earlier ones. *Why: the practical multi-env pattern.*
+
+**⭐ Q: How does Helm rollback work?**
+Helm tracks the history of each release (`helm history <release>`). `helm rollback <release> <revision>` reverts to a previous version — it re-applies that revision's manifests. This is one of Helm's big advantages over raw `kubectl apply`. *Why: ties to rollback strategy on your resume.*
+
+**Q: What are Helm hooks?**
+Annotations that run resources at specific points in a release lifecycle — `pre-install`, `post-install`, `pre-upgrade`, `post-delete`, etc. Used for things like running a database migration Job before an upgrade. *Why: advanced chart knowledge.*
+
+**Q: Helm vs Kustomize?**
+Helm = templating with values + package management + release/rollback (powerful but Go templating can get complex). Kustomize = template-free overlays — you patch a base manifest per environment (simpler, built into kubectl, no templating language, but no packaging/release management). Helm for packaging/distribution and complex parameterization; Kustomize for simpler environment overlays. Some teams use both (Kustomize to render, or Helm + post-render). *Why: a common "which and why" question.*
+
+**Q: How do you test/validate a Helm chart?**
+`helm lint` (syntax/best-practice checks), `helm template` (render templates locally to see the output YAML without deploying), `--dry-run` (server-side validation), and `helm test` (run test hooks against a deployed release). *Why: testing question you specifically asked about — these are the chart validation tools.*
+
+---
+
+# PART 3 — GITOPS & ARGOCD
+
+## GitOps concepts
+
+**⭐ Q: What is GitOps?**
+An operational model where **Git is the single source of truth** for declarative infrastructure and application state. You describe the desired state in Git; an in-cluster controller continuously **reconciles** the actual cluster state to match Git. You don't `kubectl apply` from a pipeline — you commit to Git, and the controller pulls and applies. Changes happen via pull request (reviewed, audited, revertable). *Why: the core definition; "Git as source of truth + reconciliation" is the answer.*
+
+**⭐ Q: Push vs Pull CD — and why GitOps (pull) is preferred?**
+**Push** — the CI pipeline has cluster credentials and pushes changes in (`kubectl apply` from CI). **Pull** — a controller *inside* the cluster watches Git and pulls changes in. Pull (GitOps) is preferred because: (1) **security** — cluster credentials never leave the cluster; CI doesn't need cluster access; (2) **source of truth** — what's in Git *is* what's in the cluster, with drift detection; (3) **auditability** — every change is a Git commit, reviewed via PR; (4) **easy rollback** — revert the commit. *Why: THE GitOps question; this is on your resume (ArgoCD). Lean on your project experience.*
+
+**⭐ Q: What's the reconciliation loop in GitOps?**
+The controller (ArgoCD) continuously compares the desired state in Git against the actual cluster state. If they differ (drift — someone made a manual change, or Git was updated), it reports the app as **OutOfSync** and (if auto-sync is on) re-applies Git's state to correct it. It's the same level-triggered, desired-vs-actual model as Kubernetes controllers themselves. *Why: ties GitOps to the reconciliation concept from the K8s internals deep-dive.*
+
+## ArgoCD
+
+**⭐ Q: What is ArgoCD and how does it work?**
+A GitOps continuous-delivery controller that runs *inside* the cluster. You define an **Application** pointing to a Git repo path (containing manifests, Helm charts, or Kustomize) and a target cluster/namespace. ArgoCD watches the repo, compares desired (Git) vs live (cluster) state, shows sync status, and applies changes — manually or via auto-sync. It gives a UI/CLI showing health and sync status of every app. *Why: you used ArgoCD in your project — explain it from real experience.*
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: checkout
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/org/manifests
+    targetRevision: main
+    path: apps/checkout
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    automated:
+      prune: true          # delete resources removed from Git
+      selfHeal: true       # revert manual cluster changes back to Git
+```
+
+**⭐ Q: What do `prune`, `selfHeal`, and auto-sync do?**
+**Auto-sync** — automatically apply Git changes to the cluster. **prune** — delete cluster resources that were removed from Git (keeps cluster matching Git exactly). **selfHeal** — if someone makes a manual change in the cluster, ArgoCD reverts it back to match Git (enforces Git as truth). *Why: these are the practical knobs; selfHeal enforcing Git-as-truth is the key concept.*
+
+**Q: What's the App-of-Apps pattern?**
+A parent ArgoCD Application that points to a Git path containing *other* Application definitions — so one app bootstraps many. Used to manage many apps/environments declaratively from a single root. *Why: tests scaling ArgoCD across many apps — an advanced pattern.*
+
+**Q: What are sync waves and hooks in ArgoCD?**
+**Sync waves** order resource application (e.g., apply the database before the app that needs it) using annotations. **Resource hooks** (PreSync, Sync, PostSync) run things at sync phases — like a migration Job before the new version syncs. *Why: tests ordered, safe deployments.*
+
+**⭐ Q: How does ArgoCD handle rollback?**
+Two ways: revert the Git commit (the GitOps way — ArgoCD syncs back to the previous state, fully audited), or use ArgoCD's history to roll back to a previous synced revision directly. The Git-revert approach is preferred because it keeps Git as the source of truth and is auditable. *Why: ties to rollback strategy; the "revert the commit" answer shows you get GitOps.*
+
+**Q: ArgoCD vs Flux?**
+Both are GitOps controllers. ArgoCD has a rich UI and is application-centric (good visibility, popular for app delivery). Flux is more lightweight, CLI/GitOps-toolkit-based, and composable. Both reconcile Git → cluster; choice is largely preference/ecosystem. *Why: comparison question.*
+
+---
+
+# PART 4 — THE FULL PIPELINE: HOW IT ALL FITS
+
+**⭐ Q: Walk me through a complete CI/CD + GitOps pipeline using these tools.**
+> Developer pushes code → **GitHub Actions** (CI) runs: checkout → tests → SAST scan → build Docker image → **Trivy scan** the image → push to **ACR** with an immutable tag (git SHA) → update the image tag in a **Helm values file** in a separate *manifests* Git repo (or open a PR). → **ArgoCD** (CD) detects the change in the manifests repo → compares desired vs live → syncs the new version into AKS. Rollback = revert the Git commit. 
+
+The key architectural point: **CI builds and pushes to a registry + updates Git; CD (ArgoCD) pulls from Git into the cluster.** CI never touches the cluster directly — that's the security win of GitOps. *Why: this is the synthesis question; being able to narrate the whole flow with the CI/CD split is a strong signal. Ties to your resume and Athena.*
+
+**Q: Why separate the app code repo from the manifests/config repo?**
+Separation of concerns: the app repo triggers builds; the manifests repo is what ArgoCD watches for deployment. It means a config/deployment change doesn't require an app rebuild, the deployment history is a clean Git log, and you can control who can change *what's deployed* separately from who changes *code*. *Why: a GitOps best-practice question.*
+
+---
+
+# PART 5 — SECURITY & TESTING (you specifically asked)
+
+**⭐ Q: What security checks belong in a CI/CD pipeline?**
+- **SAST** (Static Application Security Testing) — scan source code for vulnerabilities (e.g., CodeQL, SonarQube).
+- **SCA** (Software Composition Analysis) — scan dependencies for known CVEs (Dependabot, Snyk).
+- **Image scanning** — scan the built container for vulnerabilities (**Trivy**, Grype, Defender for Containers) *before* pushing.
+- **Secret scanning** — detect committed secrets (GitGuardian, GitHub secret scanning, gitleaks).
+- **IaC scanning** — scan Terraform/manifests for misconfigurations (tfsec, Checkov, kube-linter).
+- **Image signing** — sign images (Cosign/Sigstore) and verify at deploy so only trusted images run.
+*Why: "shift-left security" — a strong DevSecOps signal; Trivy + SAST + secret scanning are the core ones to name.*
+
+**⭐ Q: How do you secure the supply chain from code to cluster?**
+Pin GitHub Actions to commit SHAs; least-privilege `GITHUB_TOKEN` and OIDC for cloud auth (no stored long-lived secrets); scan code, dependencies, and images in CI; sign images and verify signatures at admission (Cosign + a policy engine like Kyverno/OPA Gatekeeper); use immutable image tags; private registry (ACR) with RBAC; and in the cluster, admission policies that reject unsigned/untrusted/root images. End to end: trusted code → scanned → signed → only verified artifacts run. *Why: a senior supply-chain-security question; ties CI security to cluster admission control.*
+
+**Q: What testing belongs in the pipeline?**
+Unit tests (fast, every commit), integration tests (services together), `helm lint` + `helm template` + `--dry-run` (validate manifests), `kube-linter`/`kubeval` (validate K8s YAML), smoke tests post-deploy (is the service actually up?), and in GitOps, ArgoCD health checks confirm the deployed app is healthy. For progressive delivery, canary analysis automatically tests the new version against metrics before full rollout. *Why: the testing question you asked; covers code → manifest → post-deploy validation.*
+
+**Q: How does GitOps improve security specifically?**
+Cluster credentials never leave the cluster (CI has no cluster access); every change is a reviewed, audited Git commit (no ad-hoc `kubectl` to prod); drift is detected and auto-corrected (selfHeal), so manual tampering is reverted; and access control is enforced via Git (who can merge to the manifests repo controls what deploys). It turns "who has kubectl access to prod" into "who can merge to Git." *Why: connects GitOps to security — a sophisticated answer.*
+
+---
+
+# PART 1 — FOUNDATIONS
+
+## Basics
+
+**⭐ Q: What is observability, and how is it different from monitoring?**
+Monitoring tells you *whether* a system is working (predefined dashboards/alerts on known failure modes — "is CPU high?"). Observability is the ability to ask *arbitrary new questions* about your system's internal state from its external outputs, including failures you didn't predict ("why is *this specific* user's request slow?"). Monitoring answers known-unknowns; observability helps with unknown-unknowns. *Why: the classic opener; the "known vs unknown unknowns" framing signals maturity.*
+
+**⭐ Q: What are the three pillars of observability?**
+**Metrics** — numeric time-series, cheap to store, great for dashboards/alerts/trends ("error rate is 5%"). **Logs** — discrete timestamped event records, detailed ("here's the exact exception"). **Traces** — follow a single request across services, showing where time was spent ("the checkout call spent 4s in the payments service"). They correlate: a metric tells you something's wrong, a trace tells you which hop, a log tells you exactly what. *Why: foundational; every SRE interview expects this.*
+
+**Q: When do you use each pillar?**
+Metrics: alerting, dashboards, trends, SLOs (always-on, low cost). Logs: detailed debugging, audit, exact error messages (higher cost, query when investigating). Traces: latency analysis, finding bottlenecks in distributed request flows, understanding service dependencies. The skill is using them *together* during an incident. *Why: tests practical judgment, not just definitions.*
+
+## Intermediate
+
+**⭐ Q: Explain how the three pillars correlate during an incident.**
+A metric alert fires (error rate spike). You pivot to a **trace** of a failing request to see *which service/span* failed and where latency went. From the trace's span, you jump to the **logs** for that trace ID to read the actual error. Metrics tell you *something's wrong and roughly where*; traces tell you *which hop*; logs tell you *exactly what*. Exemplars (trace IDs attached to metric samples) and shared trace IDs in logs make this jump seamless in Grafana. *Why: this is the SRE workflow — demonstrating you think across pillars, not in silos, is a strong signal.*
+
+**Q: What's an exemplar?**
+A sample trace ID attached to a metric data point — so when you see a latency spike on a graph, you can click directly to an *example trace* that contributed to it. It's the bridge from metrics to traces. *Why: shows modern observability depth; ties pillars together.*
+
+**Q: What are the RED, USE, and Four Golden Signals methods?**
+**RED** (for request-driven services): Rate, Errors, Duration. **USE** (for resources): Utilization, Saturation, Errors. **Four Golden Signals** (Google): Latency, Traffic, Errors, Saturation. RED ≈ the request-facing subset of golden signals; USE is for the underlying resources (CPU, memory, disk). *Why: these frameworks structure *what* to measure — interviewers want to hear you have a method, not random metrics.*
+
+---
+
+# PART 2 — METRICS & PROMETHEUS
+
+**⭐ Q: Why does Prometheus use a pull model, and what's the consequence?**
+Prometheus *scrapes* targets rather than receiving pushed data. Benefits: a free up/down signal (the `up` metric — if a scrape fails, the target is down), centralized control of scrape intervals, and targets don't need to know where to push. Consequence: short-lived jobs (CronJobs, batch) may finish before being scraped — solved with the **Pushgateway** for those specific cases. *Why: a guaranteed Prometheus question; the pull-vs-push reasoning is core.*
+
+**⭐ Q: What's the difference between Counter, Gauge, Histogram, and Summary?**
+**Counter** — only increases (total requests); use `rate()` on it. **Gauge** — goes up and down (memory usage, queue depth, temperature). **Histogram** — buckets observations (request durations into <0.1s, <0.5s, <1s) for server-side percentile calculation. **Summary** — computes quantiles client-side. For latency, prefer Histogram because it's aggregatable across instances; Summary can't be aggregated. *Why: metric-type choice is commonly tested; the histogram-vs-summary aggregation point is the depth signal.*
+
+**⭐ Q: Why must you `rate()` before `sum()`, never the reverse?**
+Counters reset to zero on pod restart. `rate()` is reset-aware — it detects the drop and corrects for it. If you `sum()` raw counters first, a single restart makes the summed value appear to plummet, and `rate()` on that produces garbage. Always `sum(rate(metric[5m]))`. *Why: the single most common PromQL mistake interviewers probe.*
+
+**⭐ Q: How do you compute p99 latency, and what's the catch with percentiles?**
+`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))`. The catch: you **cannot average percentiles** across instances — p99 of (p99_a, p99_b) is meaningless. You must aggregate the raw histogram *buckets* first (sum by `le`), then compute the quantile once. *Why: tests real PromQL fluency; the "can't average percentiles" rule separates beginners from people who've done it.*
+
+**⭐ Q: What is cardinality and why is it the #1 way Prometheus blows up?**
+Cardinality = the number of unique time-series, driven by label-value combinations. Each unique combination is a separate series stored in memory. Putting high-cardinality values in labels (user IDs, request IDs, full URLs with IDs, emails) creates millions of series and exhausts memory, crashing Prometheus. Control it: never label with unbounded values, use relabeling to drop dangerous labels, monitor `prometheus_tsdb_head_series`, and push high-cardinality data to logs/traces instead. *Why: the most important operational Prometheus lesson; a guaranteed senior-level question.*
+
+**Q: What are recording rules and when do you use them?**
+Recording rules pre-compute expensive or frequently-used queries at scrape interval and store the result as a new metric. Use for slow dashboard queries, SLI computations referenced by multiple alerts, and anything evaluated often. Naming convention: `level:metric:operation` (e.g., `sli:checkout_availability:ratio_rate5m`). *Why: tests whether you know how to make a metrics system performant at scale.*
+
+**Q: How does Prometheus discover what to scrape in Kubernetes?**
+Via the Prometheus Operator's **ServiceMonitor** (and PodMonitor) CRDs — you declare which services/pods to scrape with which interval and path, and Prometheus auto-discovers matching targets. Plus standard kubernetes_sd service discovery. *Why: ties to your Athena project (you wrote ServiceMonitors) and real AKS Prometheus setup.*
+
+---
+
+# PART 3 — LOGS
+
+**⭐ Q: Loki vs ELK (Elasticsearch) — the architectural difference and tradeoff?**
+**Loki** indexes only metadata *labels* (namespace, pod, container), not log content. The assumption: you query logs by context you already know (which service/pod), usually arriving from a dashboard or trace. Result: ~10× cheaper storage, far simpler to operate. **ELK** indexes the full text of every log — powerful for ad-hoc search and analytics, but expensive at scale and operationally heavy. Loki for cost-efficient operational logs; ELK when you need deep full-text search, complex analytics, or SIEM. *Why: a guaranteed log question; the "index labels not content" insight is the differentiator.*
+
+**Q: What is LogQL and how does it differ from PromQL?**
+Loki's query language. Two parts: a **stream selector** using labels (`{app="checkout"}`) which uses the index (fast), then a **filter pipeline** (`|= "error" | json | status="500"`) which scans the matched streams (slower the more you match). You can also generate metrics *from* logs: `rate({app="x"} |= "error" [5m])`. *Why: shows you can actually query Loki, not just describe it.*
+
+**Q: Why does label cardinality matter in Loki too?**
+Same problem as Prometheus — each unique label combination is a separate *stream*. High-cardinality labels (request ID, user ID) explode the number of streams and destroy Loki's performance. Keep labels low-cardinality; put high-cardinality data in the log *content* (which isn't indexed), not in labels. *Why: tests that you understand the design principle deeply, not just the tool.*
+
+**Q: What makes a good structured log?**
+JSON-formatted (machine-parseable), with consistent fields: timestamp, level, service, **trace ID** (for correlation), a clear message, and relevant context — but *not* secrets or PII. Structured logs let you query by field instead of regex-scraping text. *Why: tests log hygiene; the trace ID for correlation is the key SRE detail.*
+
+---
+
+# PART 4 — TRACES
+
+**⭐ Q: What is distributed tracing and why is it essential for microservices?**
+A trace follows a single request as it flows through multiple services, recording each step as a **span** with timing. It shows the full request path and where time was spent — answering "which of the 8 services in this request is slow?" In microservices, metrics and logs alone can't tell you *which hop* failed or slowed; only traces stitch the request together end-to-end. *Why: core to SRE in distributed systems; ties to your dependency-failure incident.*
+
+**Q: What's a span vs a trace?**
+A **trace** is the whole journey of one request. A **span** is one unit of work within it (one service's processing, or one downstream call), with a start time, duration, and parent-child relationships. Spans nest to form the trace, showing the call tree and where latency accumulates. *Why: basic tracing vocabulary.*
+
+**⭐ Q: What is OpenTelemetry and why does it matter?**
+OpenTelemetry (OTel) is the vendor-neutral standard for instrumentation — SDKs to emit metrics, logs, and traces, plus a Collector to receive, process, and export them. It **decouples instrumentation from backend**: instrument once with OTel SDKs, then send to Tempo, Jaeger, Datadog, Honeycomb — any backend — without changing application code. It killed SDK-level vendor lock-in; every major vendor now accepts OTLP (the OTel protocol). *Why: THE modern observability shift; a guaranteed question for current SRE roles. Ties to your Athena project.*
+
+**Q: Tempo vs Jaeger?**
+Both store traces. **Tempo** follows Loki's philosophy — store cheaply, retrieve by trace ID, no expensive attribute indexing; you find traces via exemplars from metrics or IDs from logs. **Jaeger** indexes spans for richer free-form search — more flexible but more costly. Tempo for cost-efficiency and Grafana integration; Jaeger when you need deep span search. *Why: tracing backend choice; ties to Athena.*
+
+**Q: What is sampling and why do you need it?**
+Tracing every request at high volume is expensive (storage, overhead). Sampling keeps a subset. **Head-based** sampling decides at the start (e.g., keep 10%) — simple but may miss rare errors. **Tail-based** sampling decides after the trace completes (e.g., keep all errors and slow traces, sample the rest) — smarter, keeps the interesting traces, but needs more infrastructure. *Why: a practical scaling question; tail-based for keeping errors is the senior answer.*
+
+---
+
+# PART 5 — SLI / SLO / ERROR BUDGETS (the heart of SRE)
+
+**⭐ Q: Define SLI, SLO, and SLA.**
+**SLI** (Indicator) = the measured number — e.g., % of successful requests, or % of requests under 300ms. **SLO** (Objective) = the internal target for that SLI — e.g., 99.5% over 30 days. **SLA** (Agreement) = the external contract with customers, with penalties if breached — usually set *looser* than your SLO so you have a safety margin. SLI = what you measure, SLO = your goal, SLA = the promise to customers. *Why: the absolute core of SRE; you must nail this distinction.*
+
+**⭐ Q: What is an error budget and how does it change how teams work?**
+Error budget = 1 − SLO. For a 99.5% SLO, the budget is 0.5% — about 216 minutes of allowed failure per month. It's a *shared currency* between dev and ops: if there's budget remaining, you can take risks and ship features fast; if the budget is burned, you freeze risky releases and focus on reliability. It turns "how reliable should we be?" from an argument into a data-driven decision. *Why: the error budget is *the* SRE concept; "shared currency / data-driven decision" is the framing that impresses.*
+
+**⭐ Q: What's a good SLI? How do you choose one?**
+A good SLI reflects the *user's experience*, not internal mechanics. Base it on user-journey outcomes: availability (% successful requests), latency (% of requests under a threshold), correctness, freshness. Measure at the point closest to the user (the load balancer or gateway, not deep internal services). Avoid SLIs the user doesn't care about (like CPU — that's a cause, not a user-facing symptom). *Why: tests whether you understand SLOs are about *users*, not infrastructure.*
+
+**⭐ Q: Explain multi-window, multi-burn-rate alerting and why it beats threshold alerting.**
+Instead of alerting on a raw threshold ("error rate > 1%"), you alert on **burn rate** — how fast you're consuming the error budget relative to the SLO. Burn rate = error rate ÷ (1 − SLO). At 14.4× burn, you'd exhaust a 30-day budget in ~2 days (page now). **Multi-window** means a short *and* a long window must both breach before firing — the short confirms it's happening now, the long confirms it's sustained, which eliminates flapping and gives fast recovery. Multiple burn-rate tiers map urgency to severity (fast burn → page, slow burn → ticket). *Why: the most advanced alerting concept; straight from the Google SRE Workbook. This is what separates strong SRE candidates. Ties to your Athena project.*
+
+**Q: What's the difference between alerting on causes vs symptoms?**
+Symptom-based alerting fires on user-facing impact ("error rate is high," "latency exceeds SLO") — what the *user* feels. Cause-based fires on internal conditions ("CPU is 90%") which may or may not affect users. SRE favors **symptom-based** alerts because they're actionable and user-relevant; cause metrics belong on dashboards for diagnosis. The rule: page on symptoms, diagnose with causes. *Why: a core SRE alerting philosophy; that JD you shared specifically said "symptom-based alerting."*
+
+---
+
+# PART 6 — ALERTING & ON-CALL QUALITY
+
+**⭐ Q: How do you reduce alert fatigue / improve on-call signal quality?**
+Make every alert actionable (the rule: *if an alert doesn't require a human action, it's a dashboard metric, not an alert*). Use `for` durations so transient spikes don't fire. Switch from raw thresholds to burn-rate/SLO-based alerts. Add inhibition rules (suppress symptom alerts when a root-cause alert is firing). Group related alerts. Remove or downgrade non-actionable alerts. *Why: directly your real experience — the noisy-alert cleanup (8-10 → 2-3 pages). Lead with that story.*
+
+**Q: What is Alertmanager and what does it do?**
+Prometheus fires alerts; Alertmanager handles them — **routing** (by severity/team), **grouping** (bundle related alerts into one notification), **inhibition** (suppress alerts when a higher-priority one is active), **silencing** (mute during maintenance), and **deduplication**. It delivers to receivers (PagerDuty, Slack, email, webhook). *Why: tests the alerting pipeline beyond just firing.*
+
+---
+
+# PART 7 — RESILIENCE & ADVANCED (the JD-level topics)
+
+**Q: What reliability patterns prevent cascading failures?**
+Timeouts (don't wait forever), retries with backoff *and jitter* (recover from transient failures without thundering-herd), circuit breakers (stop calling a failing dependency, fail fast, let it recover), bulkheads (isolate resource pools so one failure can't exhaust everything), load shedding (drop excess load to protect core function), graceful degradation (serve reduced functionality rather than failing). *Why: the resilience patterns from that SRE JD; ties observability to system design.*
+
+**Q: What is chaos engineering and how does it relate to observability?**
+Deliberately injecting controlled failures (kill a pod, inject latency, simulate a zone outage) to validate resilience assumptions and uncover unknown failure modes — with a hypothesis tied to an SLO ("a regional dependency failure should degrade gracefully without breaching the availability SLO"), blast-radius limits, and abort conditions. Observability is *essential* — you can't run chaos safely without the metrics/traces/logs to see the impact and confirm the hypothesis. *Why: that JD wanted chaos engineering; honest framing — "I understand the principles and I'd run controlled experiments in my Athena cluster" (cross-ref the chaos suggestion).*
+
+**Q: What's the difference between MTTD, MTTR, MTBF?**
+MTTD (Mean Time To Detect) — how long until you *notice* a problem (observability drives this down). MTTR (Mean Time To Restore/Repair) — how long to *fix* it. MTBF (Mean Time Between Failures) — reliability of the system between incidents. Good observability improves MTTD and MTTR. *Why: reliability metrics vocabulary; ties to your "reduced MTTR" framing.*
+
+**Q: What goes into a good postmortem?**
+Blameless (focus on systems and contributing factors, not individuals), a clear timeline, the impact (users/duration/SLO budget consumed), root cause(s) including contributing factors, what went well/poorly in the response, and concrete action items with owners and deadlines — then verify they're done. The goal is learning and prevention, not blame. *Why: incident management is core SRE; "blameless" and "action items with owners" are the key signals.*
+
+---
+
+# PART 1 — COMPUTE & AKS (your core)
+
+## Basics
+
+**Q: What are the main Azure compute options and when each?**
+VMs (full control, you manage the OS — lift-and-shift, custom workloads). VM Scale Sets (auto-scaling identical VMs behind a load balancer). App Service (managed PaaS for web apps — no infra management). Functions (serverless, event-driven, pay-per-execution). AKS (managed Kubernetes — container orchestration at scale). Container Instances (ACI — single containers, no orchestration, burst workloads). *Why: tests whether you can match workload to service — a design question.*
+
+**⭐ Q: What is AKS and what does Azure manage vs you?**
+Azure Kubernetes Service is managed Kubernetes. **Azure manages the control plane** — API server, etcd, scheduler, controller-manager — for free, and you don't see or SSH into those nodes. **You manage** the worker node pools, your workloads, and configuration. You get managed upgrades, scaling, and tight integration with Azure AD, ACR, Azure Monitor, and Azure networking. *Why: THE most important Azure answer for you — and it's your daily platform.*
+
+**⭐ Q: What are node pools in AKS?**
+Groups of worker nodes with the same config. A **system node pool** runs critical system pods (CoreDNS, metrics-server); **user node pools** run your workloads. You can have multiple user pools with different VM sizes (e.g., a GPU pool, a memory-optimized pool) and use taints/nodeSelectors to place workloads. Each pool can scale independently. *Why: real AKS operations knowledge; shows you understand cluster structure.*
+
+## Intermediate / Advanced
+
+**⭐ Q: How does autoscaling work in AKS — the two layers?**
+Two distinct layers: **HPA (Horizontal Pod Autoscaler)** scales *pods* based on CPU/memory/custom metrics. **Cluster Autoscaler** scales *nodes* — when pods can't schedule due to insufficient resources, it adds nodes; when nodes are underutilized, it removes them. They work together: HPA adds pods → if no room, Cluster Autoscaler adds nodes. There's also KEDA for event-driven pod scaling (queue depth, etc.). *Why: tests understanding that pod scaling and node scaling are separate — a common confusion.*
+
+**⭐ Q: How do AKS pods get Azure credentials securely?**
+**Workload Identity** (the current best practice) — federates a Kubernetes ServiceAccount with an Azure AD identity, so pods get short-lived tokens to access Azure resources (Key Vault, Storage) with *no stored secrets*. The older approach was pod-managed identities (AAD Pod Identity), now deprecated. *Why: security question; "no stored secrets, short-lived tokens" is the key phrase.*
+
+**⭐ Q: Azure CNI vs kubenet in AKS — the tradeoff?**
+Azure CNI gives every pod a real IP from the VNet subnet — pods are directly routable, better performance, integrate with VNet features, but consume lots of VNet IP space (nodes pre-allocate IP blocks), so large clusters can exhaust the subnet. Kubenet gives pods IPs from a separate overlay range and NATs through the node — conserves VNet IPs but adds a hop and has routing limitations. Choose Azure CNI for VNet integration when you have IP space; kubenet to conserve IPs. *Why: AKS-specific networking — high value for your platform. (Cross-ref the networking deep-dive.)*
+
+**Q: How do AKS upgrades work and how do you do them safely?**
+AKS supports upgrading the control plane and node pools (Azure manages the control-plane upgrade). For nodes, AKS does a rolling upgrade — cordons and drains a node (respecting PodDisruptionBudgets), upgrades it, brings it back, moves to the next. Best practice: upgrade control plane first, then node pools; have PDBs and multiple replicas so draining doesn't cause outages; test in non-prod first. *Why: real operational task; ties PDBs to a concrete scenario.*
+
+---
+
+# PART 2 — NETWORKING
+
+**⭐ Q: What is a VNet, subnet, and NSG?**
+VNet = your isolated private network in Azure. Subnet = a segment of the VNet's address space (separate tiers). NSG (Network Security Group) = stateful firewall rules applied to subnets or NICs, controlling inbound/outbound traffic by source/dest/port. **Stateful** means allowing inbound automatically allows the return traffic. *Why: foundational; NSG misconfig is a common "can't reach the service" cause.*
+
+**⭐ Q: Azure Load Balancer vs Application Gateway vs Front Door vs Traffic Manager?**
+- **Azure Load Balancer** — L4 (TCP/UDP), regional, raw traffic distribution.
+- **Application Gateway** — L7 (HTTP), regional, path/host routing + WAF + TLS termination.
+- **Front Door** — L7, *global*, edge routing across regions + CDN + global failover + WAF.
+- **Traffic Manager** — DNS-based global routing (returns different IPs based on routing method like geographic/priority).
+Pick by layer (L4 vs L7) and scope (regional vs global). *Why: a design question; knowing global vs regional and L4 vs L7 is the differentiator.*
+
+**Q: How does traffic from the internet reach a pod in AKS?**
+Internet → Azure Load Balancer (provisioned by a Service of type LoadBalancer, or Application Gateway via AGIC) → Ingress controller pods → Service (ClusterIP) → pod. Typically you have one LB for the ingress controller, and the ingress does L7 routing to internal services. *Why: ties Azure networking to K8s networking. (Cross-ref.)*
+
+**Q: What's a Private Endpoint and Service Endpoint?**
+Both secure access to Azure PaaS services (like Azure SQL, Storage) from your VNet. **Private Endpoint** gives the service a private IP *inside* your VNet (traffic never touches the internet — most secure). **Service Endpoint** extends your VNet identity to the service over the Azure backbone but the service keeps a public IP. Private Endpoint is the modern, more secure choice. *Why: security/networking design; relevant to "how does AKS reach Azure SQL privately."*
+
+**Q: What's ExpressRoute vs VPN Gateway?**
+Both connect on-prem to Azure. VPN Gateway = encrypted tunnel over the public internet (cheaper, variable performance). ExpressRoute = a private, dedicated connection via a provider (bypasses the internet — consistent performance, higher cost, used by enterprises). *Why: hybrid connectivity; enterprise/GCC relevant.*
+
+---
+
+# PART 3 — IDENTITY & SECURITY
+
+**⭐ Q: What is Azure AD (Entra ID) and how does it relate to RBAC?**
+Azure AD (now Entra ID) is Azure's identity provider — manages users, groups, service principals, and authentication (OIDC, SAML, MFA). **Azure RBAC** controls *what* an identity can do on Azure resources via role assignments (Owner, Contributor, Reader, or custom roles) scoped to a subscription/resource group/resource. Identity (who) + RBAC (what they can do). *Why: identity is foundational to everything in Azure.*
+
+**⭐ Q: Service Principal vs Managed Identity — when each?**
+Both are non-human identities for apps/services to authenticate to Azure. **Service Principal** = you create and manage credentials (a secret or cert) — you're responsible for rotating them. **Managed Identity** = Azure manages the credentials for you, no secrets to store or rotate — preferred wherever supported. System-assigned (tied to one resource's lifecycle) vs user-assigned (standalone, shareable). *Why: security best practice; "Managed Identity = no secrets to rotate" is the key point. Maps to AKS Workload Identity.*
+
+**⭐ Q: What is Azure Key Vault and how do AKS workloads use it?**
+A managed service for storing secrets, keys, and certificates securely, with access controlled by RBAC/policies and full audit logging. AKS pods access it via the **Secrets Store CSI driver** (mounts Key Vault secrets as files in the pod) combined with Workload Identity (no stored credentials). *Why: secrets management is a guaranteed DevOps/SRE topic; the CSI driver + Workload Identity combo is the modern pattern.*
+
+**Q: How do you implement least privilege in Azure?**
+Use built-in roles (Reader, Contributor) or custom roles with minimal permissions, scope assignments as narrowly as possible (resource > resource group > subscription), use Managed Identities instead of stored credentials, use PIM (Privileged Identity Management) for just-in-time elevated access, and audit with Azure AD logs. *Why: security maturity signal.*
+
+---
+
+# PART 4 — STORAGE & DATA
+
+**Q: What are the Azure Storage types?**
+Within a Storage Account: **Blob** (object storage — files, backups, static content, logs), **Files** (managed SMB/NFS file shares — can be ReadWriteMany for AKS), **Queue** (simple message queue), **Table** (NoSQL key-value). Plus **Managed Disks** for VM/AKS block storage. *Why: matching storage type to use case; Blob and Files come up most.*
+
+**⭐ Q: For AKS persistent volumes, when Azure Disk vs Azure Files?**
+**Azure Disk** = block storage, **ReadWriteOnce** (one node at a time) — for single-pod stateful workloads like a database. **Azure Files** = SMB/NFS, **ReadWriteMany** (multiple nodes) — when multiple pods across nodes need shared access. The RWO limitation of Disk is why a Deployment sharing one disk across nodes fails — use Files for shared, Disk for single-pod. *Why: ties Azure storage to K8s PV access modes. (Cross-ref storage deep-dive.)*
+
+**Q: Azure SQL vs Cosmos DB vs managed Postgres/MySQL?**
+Azure SQL = managed SQL Server (relational, ACID). Cosmos DB = globally-distributed NoSQL, multi-model, low-latency, tunable consistency. Azure Database for PostgreSQL/MySQL = managed open-source relational. Choose by data model (relational vs NoSQL), scale/distribution needs, and existing stack. *Why: data-tier design questions.*
+
+**Q: What's Event Hubs vs Service Bus?**
+Service Bus = enterprise messaging (queues, topics, ordering, transactions) — for reliable command/message delivery between services. Event Hubs = high-throughput event streaming (millions of events/sec, like Kafka) — for telemetry, logs, event pipelines. Service Bus for messaging, Event Hubs for streaming. *Why: async architecture questions; both were in that SRE JD you shared.*
+
+---
+
+# PART 5 — MONITORING & OBSERVABILITY (your strength)
+
+**⭐ Q: Azure Monitor vs Application Insights vs Log Analytics — how they relate?**
+**Log Analytics** = the underlying data store + query engine (KQL — Kusto Query Language). **Application Insights** = the APM layer on top — request tracing, dependencies, exceptions, performance for your apps; its data lands in a Log Analytics workspace. **Azure Monitor** = the umbrella platform tying together metrics, logs, alerts, and dashboards across all Azure resources. *Why: you use these daily — be able to explain the hierarchy crisply; it's a guaranteed question for your profile.*
+
+**⭐ Q: What is KQL and why does it matter?**
+Kusto Query Language — the query language for Log Analytics and App Insights. You use it to query logs, traces, and metrics (e.g., `requests | where resultCode >= 500 | summarize count() by bin(timestamp, 5m)`). It's the Azure equivalent of PromQL/LogQL for log analysis. *Why: hands-on Azure observability requires KQL; mention you use it for incident investigation.*
+
+**Q: How do you set up alerting in Azure Monitor?**
+Alert rules based on metrics or log (KQL) queries, with conditions and thresholds, routed through **Action Groups** (which define who/what gets notified — email, SMS, webhook, PagerDuty, runbook). You can do metric alerts (fast, on platform metrics) or log alerts (KQL-based, more flexible). *Why: ties to your alerting experience; Action Groups are the routing mechanism.*
+
+**Q: How does Azure monitoring integrate with AKS?**
+Container Insights collects AKS metrics and logs into Log Analytics. You can also run Prometheus (managed Azure Monitor for Prometheus, or self-hosted) and Grafana (managed Azure Managed Grafana) — which is closer to your actual stack. *Why: connects your Prometheus/Grafana work to the Azure-native option.*
+
+---
+
+# PART 6 — IaC & DEVOPS TOOLING
+
+**Q: ARM templates vs Bicep vs Terraform?**
+ARM templates = Azure-native JSON IaC (verbose). Bicep = a cleaner DSL that compiles to ARM (Azure-native, more readable). Terraform = cloud-agnostic, often preferred for multi-cloud and its ecosystem. For Azure-only shops, Bicep is gaining traction; for multi-cloud or existing Terraform, Terraform. *Why: IaC choice question; you migrated to Terraform, so you can speak to why.*
+
+**⭐ Q: What's the difference between Azure DevOps and GitHub Actions?**
+Both do CI/CD. Azure DevOps = a full suite (Repos, Pipelines, Boards, Artifacts) — pipelines defined in YAML, strong Azure integration, common in enterprises. GitHub Actions = CI/CD integrated into GitHub, workflow YAML, huge marketplace of actions. You use both. Many orgs are shifting toward GitHub Actions. *Why: you support both — be ready to compare and say which you'd pick and why.*
+
+**Q: What is ACR and how does it fit the pipeline?**
+Azure Container Registry — managed private Docker registry. Pipeline: build image → push to ACR → AKS pulls from ACR (authenticated via Managed Identity, no stored creds). ACR also does image scanning (with Defender) and geo-replication. *Why: ties your container + pipeline + AKS knowledge together.*
+
+---
+
+# PART 7 — RELIABILITY, HA & DR (the SRE angle)
+
+**⭐ Q: Availability Zone vs Region — and designing for failure?**
+A **Region** is a geographic area; an **Availability Zone** is a physically separate datacenter within a region (independent power/cooling/network). Spreading across AZs survives a single-datacenter failure with low latency; spreading across regions survives a whole-region outage (your DR strategy) but with higher latency/complexity. For AKS: multi-zone node pools + topologySpreadConstraints to spread pods across zones. *Why: core SRE design question. (Cross-ref the AZ/region deep-dive.)*
+
+**⭐ Q: How do you design an AKS workload to survive an AZ failure?**
+Multi-zone node pool spread across AZs, `topologySpreadConstraints` to distribute replicas across zones, enough replicas with headroom to absorb losing a zone, a zone-redundant managed database (Azure SQL with zone redundancy), PodDisruptionBudgets, and health probes + autoscaling. Goal: losing a zone degrades capacity but not availability. *Why: SRE design; ties AKS + Azure HA together.*
+
+**Q: Explain RTO and RPO and how they shape Azure DR design.**
+RTO (Recovery Time Objective) = max acceptable downtime; RPO (Recovery Point Objective) = max acceptable data loss (in time). Tight RPO → synchronous geo-replication or frequent backups; tight RTO → warm/hot standby in a second region rather than cold restore. In Azure: geo-redundant storage, Azure SQL active geo-replication, multi-region AKS with Front Door/Traffic Manager for failover. Looser targets = cheaper; tighter = costlier. *Why: DR design; that SRE JD specifically wanted RTO/RPO and failover drills.*
+
+**Q: What Azure features support high availability out of the box?**
+Availability Zones, zone-redundant services (SQL, Storage, Load Balancer), VM Scale Sets with health-based instance replacement, Azure SLAs (e.g., multi-AZ deployments get higher SLA), Front Door/Traffic Manager for global failover, and managed services with built-in replication. *Why: shows you know what Azure gives you vs what you must build.*
 
 ---
 
