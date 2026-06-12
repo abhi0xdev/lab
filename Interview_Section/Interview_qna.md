@@ -7,7 +7,8 @@
 **⭐ Q: What is GitHub Actions and what are its core building blocks?**
 A CI/CD platform built into GitHub. Building blocks: a **workflow** (a YAML file in `.github/workflows/` triggered by events), made of **jobs** (run on runners, parallel by default), made of **steps** (individual commands or actions). An **action** is a reusable unit of code (from the marketplace or your own). A **runner** is the machine that executes a job. *Why: foundational vocabulary; you need to read/write these.*
 
-```yaml
+yaml
+```
 name: build-and-deploy
 on:
   push:
