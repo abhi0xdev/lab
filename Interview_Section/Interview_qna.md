@@ -1,8 +1,3 @@
-# SRE / DevOps Interview Q&A Bank
-### Read-aloud study guide — deduplicated & category-ordered
-
-**How to use this:** Cover the answer, say it out loud in your own words, then check. ⭐ = high-frequency / likely-asked. Don't memorize word-for-word — own the *shape* and the *why*. The honest-framing notes (marked ⚠️) protect you when an interviewer drills past your real depth.
-
 ---
 
 ## TABLE OF CONTENTS
