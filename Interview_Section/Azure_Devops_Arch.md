@@ -9,6 +9,140 @@
 **Why this way / tradeoffs:** The architecture has to satisfy the NFRs from Phase 0 *traceably*: 99.9% availability (NFR-1) → multi-AZ + multi-region DR; data residency (NFR-6) → US-only regions; SOC2 (NFR-7) → private API, audit, separation of duties; legacy coexistence (C-1) → Windows node pool behind the *same* ingress and observability. Alternatives rejected: a single flat cluster with everything (no blast-radius isolation, fails SOC2 separation); fully separate stacks for legacy vs modern (double the operational surface, two observability planes — the opposite of what we want).
 
 Let me show the target architecture.
+
+<img width="1472" height="1240" alt="image" src="https://github.com/user-attachments/assets/11a41470-bd27-4441-80f5-3f2af77e3a66" />
+
+1.2 — Environment Isolation Model (the decision)
+Why this way / tradeoffs: This is the question the prompt explicitly asks to decide and justify — multi-cluster vs namespace. The two failure modes are: namespaces-only (cheap, but a cluster-wide misconfig or a noisy-neighbor incident hits dev and prod — unacceptable for SOC2 separation of duties), or cluster-per-environment-per-app (perfect isolation, but operational and cost explosion).
+The defensible middle, and the SOC2-compliant one:
+
+```
+Decision: CLUSTER-PER-ENVIRONMENT, NAMESPACE-PER-APP within each.
+
+  ┌─ aks-dev      (1 cluster)  → ns: appointments, notifications, records, legacy
+  ┌─ aks-staging  (1 cluster)  → ns: appointments, notifications, records, legacy
+  └─ aks-prod     (1 cluster)  → ns: appointments, notifications, records, legacy
+        (prod also: multi-AZ, DR replica in West US 2)
+```
+
+Why three clusters (one per env), not one cluster with dev/staging/prod namespaces:
+
+Blast radius — a bad cluster upgrade, a CRD change, or a runaway workload in dev cannot touch prod. They're separate control planes.
+SOC2 separation of duties — prod cluster access is gated to a different group than dev; you can prove "developers cannot touch production" with Azure RBAC at the cluster boundary, which is exactly what an auditor wants to see.
+Realistic parity — staging mirrors prod's topology (same node pools, same ingress) so a change that works in staging behaves the same in prod.
+
+Why namespace-per-app within a cluster, not a cluster per app:
+
+Apps within an environment share the same trust boundary and the same observability/ingress, so namespaces give enough isolation (RBAC, network policies, resource quotas) without N clusters to operate.
+
+Assumption: dev can be single-AZ and cheaper (smaller node counts, no DR); only prod gets the full multi-AZ + DR treatment, since NFR-1/4/5 (availability, RTO, RPO) are prod requirements.
+
+1.3 — Branching & Repo Strategy
+Why this way / tradeoffs: The core decision is separating application code repos from the GitOps/config repo. If you put deployment manifests in the same repo as app code, every config change triggers an app rebuild, the deploy history is tangled with the code history, and you can't enforce "who can change what's deployed" separately from "who can change code" — which SOC2 separation of duties requires. Alternatives rejected: monorepo-for-everything (coupling, slow CI, no clean audit boundary); manifests-inside-each-app-repo (ArgoCD would watch many repos, no single source of deployed truth).
+Branching: trunk-based, not GitFlow. GitFlow's long-lived develop/release branches create merge debt and slow the dev→prod flow. Trunk-based (short-lived feature branches → main, with environment promotion handled by the GitOps repo, not by branches) is the modern default and pairs naturally with GitOps.
+App repo (one per microservice — e.g. appointments-api)
+
+```
+appointments-api/
+├── .github/
+│   └── workflows/
+│       └── ci.yaml                 # GitHub Actions CI (build/test/scan/sign/push)
+├── src/
+│   └── ...                         # application code
+├── tests/
+│   └── ...
+├── Dockerfile
+├── .gitleaks.toml                  # secret-scan config
+├── sonar-project.properties        # SAST quality gate config
+└── README.md
+```
+Legacy app repo (recordsmgr — built via Azure DevOps)
+```
+recordsmgr/
+├── azure-pipelines.yml             # Azure DevOps CI for the legacy Windows app
+├── src/                            # .NET Framework source
+├── Dockerfile.windows              # Windows container image
+└── README.md
+```
+
+GitOps / config repo (single source of deployed truth — platform-gitops)
+
+```
+platform-gitops/
+├── bootstrap/
+│   └── root-app.yaml               # ArgoCD app-of-apps entrypoint
+├── applicationsets/
+│   ├── microservices-appset.yaml   # generates Apps across envs/clusters
+│   └── legacy-appset.yaml
+├── charts/                         # shared Helm library chart (Phase 5)
+│   └── common-lib/
+├── apps/
+│   ├── appointments-api/
+│   │   ├── base/                   # base Helm values
+│   │   └── overlays/
+│   │       ├── dev/values.yaml
+│   │       ├── staging/values.yaml
+│   │       └── prod/values.yaml    # image tag updated here by CI PR
+│   ├── notifications-svc/
+│   ├── records-read-api/
+│   └── recordsmgr/                 # legacy, same structure — same GitOps flow
+└── platform/                       # platform components as code
+    ├── ingress-nginx/
+    ├── cert-manager/
+    ├── kube-prometheus-stack/      # observability (Phase 8)
+    └── kyverno/                    # admission policies (Phase 9)
+
+```
+
+Infra repo (Terraform — platform-infra)
+
+```
+platform-infra/
+├── modules/                        # reusable modules (Phase 2/3)
+│   ├── network/
+│   ├── aks/
+│   ├── acr/
+│   ├── keyvault/
+│   └── identity/
+├── envs/
+│   ├── dev/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── terraform.tfvars
+│   │   └── backend.tf              # remote state, per-env key
+│   ├── staging/
+│   └── prod/
+└── global/
+    └── state-backend/              # bootstrap: the storage account for state itself
+```
+Why dir-per-env (not Terraform workspaces): Separate directories with separate state files and separate .tfvars make it impossible to accidentally apply dev config to prod (the workspace footgun). Each env's state is isolated, and prod's directory can have stricter branch protection. This is the senior call and it directly supports SOC2 (you can prove prod changes go through a separate, reviewed path).
+
+1.4 — Release & Promotion Strategy
+Why this way / tradeoffs: Promotion must be the same artifact moving forward, not a rebuild per environment. If you rebuild for staging and again for prod, you can't guarantee the prod image is what you tested in staging. So: build the image once, tag it immutably (git SHA), and promote the tag through environments by updating the GitOps overlay — never rebuild.
+
+```
+Promotion flow (one immutable artifact, promoted by GitOps PR):
+
+  commit → CI builds image  ──►  ghcr/ACR: appointments-api:sha-a1b2c3  (immutable)
+                                          │
+        dev overlay tag = sha-a1b2c3  ◄───┤  (CI auto-PR to gitops repo, dev)
+        ArgoCD syncs dev                  │
+                                          │
+        staging overlay tag = sha-a1b2c3 ◄┤  (PR, requires 1 reviewer approval)
+        ArgoCD syncs staging              │
+                                          │
+        prod overlay tag = sha-a1b2c3   ◄─┘  (PR, requires CODEOWNERS + prod approval)
+        ArgoCD syncs prod (Argo Rollouts canary — Phase 7)
+```
+
+Key decisions:
+
+Image tagging = immutable git SHA, never latest. You can always trace exactly which commit is running in prod (and Kyverno will enforce no-latest in Phase 9). This is both an operational and a SOC2-audit requirement.
+Environment parity — the same Helm chart deploys to all three envs; only the overlay values.yaml differs (replica counts, resource sizes, hostnames). Same chart everywhere means staging genuinely predicts prod.
+Promotion = a PR to the GitOps repo that bumps the image tag in the next overlay. Dev is auto-promoted; staging needs one reviewer; prod needs CODEOWNERS + an environment approval (Phase 6 details the gates). This makes every promotion an audited Git event — exactly the change-management trail SOC2 wants.
+Feature flags over long branches — risky/incomplete features ship dark behind a flag rather than living on a long-lived branch. This keeps trunk-based development clean and decouples deploy from release.
+
+
 ---
 # PHASE 2 — AZURE FOUNDATION (Terraform)
 
