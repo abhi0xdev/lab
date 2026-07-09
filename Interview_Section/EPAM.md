@@ -1,4 +1,4 @@
-# EPAM SRE / DevOps Interview Prep — 200 Q&A
+# EPAM SRE / DevOps Interview Prep — 250 Q&A
 ### Financial-domain client · ~4 YOE · Python (must) · PowerShell (nice) · SRE, CI/CD, K8s, Cloud, Observability (Dynatrace/Splunk/Grafana/Prometheus)
 
 > How to use this: These are interview-ready answers — say them in your own words, add a short "in my last project I…" example wherever you can. For finance clients, always tie answers back to **availability, auditability, security, and change control**. Interviewers value structured, honest answers over buzzword dumps.
@@ -874,3 +874,185 @@ Ask thoughtful ones: "What does the on-call rotation and incident culture look l
 - **For scenario questions, think out loud** and use a structured layered approach (change first, then golden signals, then bisect by layer) — interviewers assess your reasoning, not just the final answer.
 
 *Good luck! Practice saying these out loud so they sound natural, not memorized.*
+
+---
+
+## SECTION 12 — Terraform (Q201–225)
+
+**Q201. What is Terraform and why use it?**
+Terraform is an open-source Infrastructure-as-Code tool by HashiCorp that provisions and manages infrastructure declaratively using HCL (HashiCorp Configuration Language). You describe the desired end state and Terraform figures out the API calls to reach it. Benefits: cloud-agnostic (many providers), version-controlled/reviewable infra, reproducible environments, drift detection, and a clear plan-before-apply workflow. In finance it gives auditability — every infra change is a reviewed, versioned commit.
+
+**Q202. Explain the core Terraform workflow.**
+`terraform init` (download providers/modules, configure backend) → `terraform plan` (preview the diff between desired and current state — what will be created/changed/destroyed) → `terraform apply` (execute the plan) → `terraform destroy` (tear down). The plan step is the safety gate — you review exactly what will change before touching real infrastructure, which is essential in production and regulated environments.
+
+**Q203. What is Terraform state and why is it critical?**
+State (`terraform.tfstate`) is Terraform's record mapping your configuration to real-world resources. It's how Terraform knows what already exists, what to change, and what to destroy. It's critical because losing or corrupting it means Terraform loses track of your infrastructure. It can also contain sensitive values, so it must be stored securely (remote backend), encrypted, and access-controlled. Never edit it by hand.
+
+**Q204. What is a remote backend and why use one?**
+A backend defines where state is stored. A **remote backend** (S3+DynamoDB, Azure Storage, Terraform Cloud, GCS) stores state centrally instead of on someone's laptop. Benefits: team collaboration (shared state), **state locking** (prevents concurrent applies corrupting state), encryption at rest, versioning/backup, and keeping secrets off local machines. For any team — especially finance — remote backend with locking is mandatory.
+
+**Q205. What is state locking and why does it matter?**
+State locking prevents two people (or pipelines) from running `apply` simultaneously, which could corrupt state or cause conflicting changes. Backends like S3+DynamoDB or Terraform Cloud acquire a lock during operations and release it after. If a lock gets stuck (e.g. a crashed run), you can `terraform force-unlock` — carefully. It's the safeguard that makes concurrent team use safe.
+
+**Q206. What is a Terraform provider?**
+A provider is a plugin that lets Terraform interact with a specific platform's API — AWS, Azure, GCP, Kubernetes, GitHub, Datadog, etc. You declare it in a `provider` block with config (region, credentials). Providers expose resources and data sources. You pin provider versions in `required_providers` for reproducibility, since provider updates can introduce breaking changes.
+
+**Q207. Resource vs data source?**
+A **resource** (`resource "aws_instance" "web"`) is infrastructure Terraform creates and manages the lifecycle of. A **data source** (`data "aws_ami" "latest"`) reads existing information Terraform does *not* manage — e.g. look up an existing AMI, VPC, or secret to reference it. Data sources let you consume pre-existing or externally-managed resources without owning them.
+
+**Q208. What is a Terraform module?**
+A module is a reusable, parameterized package of Terraform config (a folder of `.tf` files). The root config is itself a module; you call child modules with `module "vpc" { source = "..." variables... }`. Modules promote reuse, consistency, and DRY infra (e.g. a standard "secure-vpc" or "eks-cluster" module reused across teams). They can come from local paths, the Terraform Registry, or Git.
+
+**Q209. How do you pass and manage variables in Terraform?**
+Declare with `variable "name" { type, default, description }`, reference as `var.name`. Set values via `terraform.tfvars`, `-var`/`-var-file` flags, environment variables (`TF_VAR_name`), or defaults. Use `validation` blocks for constraints and `sensitive = true` to hide secrets in output. Outputs (`output` blocks) expose values (e.g. an endpoint) to callers or other modules.
+
+**Q210. How do you manage secrets in Terraform?**
+Never hardcode secrets in `.tf` or commit `.tfvars` with secrets. Pull them at runtime from a secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) via data sources, mark variables/outputs `sensitive = true`, use environment variables or CI secret stores for credentials, and remember secrets can still land in state — so encrypt and lock down the backend. In finance, customer-managed keys and no plaintext secrets are usually required.
+
+**Q211. What do `count` and `for_each` do, and which is better?**
+Both create multiple instances of a resource. `count = 3` creates indexed copies (`[0],[1],[2]`) — simple but fragile: removing a middle item re-indexes and can destroy/recreate resources. `for_each` iterates over a map/set, keying resources by a stable string — safer for lists that change, because adding/removing one item doesn't disturb the others. Prefer `for_each` for anything that will change over time.
+
+**Q212. What is drift and how do you detect/handle it?**
+Drift is when real infrastructure differs from what state/config says — usually from manual (out-of-band) changes in the console. `terraform plan` detects it by comparing state to reality and showing the diff. Handle it by either re-applying to restore the declared state, or updating the code to match the intended change. Best practice: prevent drift by disallowing manual changes and doing everything through Terraform (enforced via IAM/policy).
+
+**Q213. `terraform import` — what is it for?**
+It brings an existing, manually-created resource under Terraform management by adding it to state (you still write the matching config). Useful when adopting Terraform for infrastructure that already exists. In newer Terraform you can use `import` blocks to do it declaratively and even generate config. It does not create anything — it just tells Terraform "this real resource maps to this config."
+
+**Q214. What are `terraform taint` / `-replace` and when do you use them?**
+They force Terraform to destroy and recreate a specific resource on the next apply — useful when a resource is in a bad state but its config hasn't changed (e.g. a corrupted VM). `taint` is deprecated in favor of `terraform apply -replace="aws_instance.web"`, which is more explicit and shows the effect in the plan first.
+
+**Q215. Explain `depends_on` and implicit vs explicit dependencies.**
+Terraform builds a dependency graph automatically (**implicit**) when one resource references another's attribute (`subnet_id = aws_subnet.a.id`), and orders creation accordingly. `depends_on` is an **explicit** dependency for cases where there's no attribute reference but an ordering requirement still exists (e.g. an app that needs an IAM policy applied first). Use it sparingly — rely on implicit dependencies where possible.
+
+**Q216. What are lifecycle meta-arguments (`create_before_destroy`, `prevent_destroy`, `ignore_changes`)?**
+- `create_before_destroy` — create the replacement before destroying the old one (zero-downtime replacements).
+- `prevent_destroy` — guard rail that blocks accidental deletion of critical resources (e.g. a prod database).
+- `ignore_changes` — ignore drift on specific attributes managed outside Terraform (e.g. an autoscaling desired count changed by the autoscaler).
+These control how Terraform handles resource replacement and change detection.
+
+**Q217. How do you manage multiple environments (dev/qa/prod) in Terraform?**
+Common approaches: (1) separate directories per environment with shared modules and per-env `.tfvars`/backends — clearest isolation, preferred for prod safety; (2) Terraform **workspaces** — same config, separate state per workspace (lighter, but easy to apply to the wrong env by mistake). For finance I favor separate state/backends per environment with strict access separation, so a dev change can never touch prod state.
+
+**Q218. What are Terraform workspaces and their limitation?**
+Workspaces let one configuration maintain multiple independent state files (`default`, `dev`, `prod`) via `terraform workspace new/select`. Limitation: they share the same code and backend, so it's easy to accidentally run `apply` against the wrong workspace, and they don't isolate credentials/blast radius well. They're fine for small variations but not a strong substitute for fully separated prod environments.
+
+**Q219. How do you test and validate Terraform code?**
+`terraform validate` (syntax/config), `terraform fmt` (formatting), `terraform plan` (preview), plus policy-as-code (Sentinel, OPA/Conftest) to enforce rules ("no public S3 buckets", "encryption required"), security scanning (tfsec, Checkov, Terrascan), and integration testing with Terratest or the native `terraform test` framework. In CI, run fmt/validate/scan/plan on every PR and gate merges on them.
+
+**Q220. How do you integrate Terraform into a CI/CD pipeline?**
+Typical flow: on PR → `init` → `fmt -check` → `validate` → security scan (tfsec/Checkov) → `plan` (post the plan output to the PR for review). On merge to main → `apply` (often with a manual approval gate for prod). Use remote state with locking, store credentials in the CI secret store (or OIDC/short-lived roles), and require the plan to be reviewed before apply. This gives an auditable, gated infra change process.
+
+**Q221. What is the difference between Terraform and CloudFormation/ARM?**
+Terraform is cloud-agnostic (one tool/language across AWS, Azure, GCP, and many SaaS providers) with external state and a large module ecosystem. CloudFormation (AWS) and ARM/Bicep (Azure) are cloud-native, provider-managed (no state file to manage yourself), and deeply integrated with their platform. Terraform wins on multi-cloud and flexibility; native tools win on tight single-cloud integration and managed state.
+
+**Q222. What are provisioners and why avoid them?**
+Provisioners (`local-exec`, `remote-exec`) run scripts as part of resource creation. HashiCorp recommends them as a **last resort** because they're not declarative, run only at create/destroy time, aren't tracked in state, and make runs non-idempotent and fragile. Prefer purpose-built tooling: cloud-init/user_data for bootstrapping, or a config-management step (Ansible) after provisioning.
+
+**Q223. How do you refactor resources without destroying them (moved blocks)?**
+Use `moved` blocks (or historically `terraform state mv`) to tell Terraform that a resource's address changed (e.g. you moved it into a module or renamed it) so it updates state instead of destroying and recreating. `moved` blocks are declarative, live in code, and are safer/reviewable in a PR. This is key when restructuring code around live production resources.
+
+**Q224. What happens if state and real infrastructure get out of sync / state is lost?**
+If state is lost, Terraform no longer knows about existing resources and may try to recreate them. Recovery: restore from backend versioning/backup, or rebuild state via `terraform import` for each resource. If state is merely out of sync (drift), `terraform plan` shows the difference and you reconcile via apply or code update. This is exactly why remote backends with versioning and locking are non-negotiable.
+
+**Q225. How do you handle a large Terraform codebase / blast radius?**
+Split infrastructure into smaller, independently-applied stacks (network, data, compute, app) each with its own state, so a change to one doesn't risk everything. Share via modules and reference across stacks using remote state data sources or explicit inputs. Benefits: smaller plans, faster applies, reduced blast radius, and clearer ownership. Tools like Terragrunt help keep DRY config across many stacks/environments.
+
+---
+
+## SECTION 13 — Git & GitHub (incl. GitHub Actions) (Q226–250)
+
+**Q226. What is Git and how is it different from GitHub?**
+Git is a distributed version-control system that tracks changes to code locally, with full history on every clone. GitHub is a cloud platform built around Git that adds collaboration (pull requests, code review, issues), hosting, access control, and automation (GitHub Actions). Git is the tool; GitHub is the hosted service and collaboration layer on top of it. (Alternatives: GitLab, Bitbucket.)
+
+**Q227. Explain the basic Git workflow.**
+Edit files (working directory) → `git add` moves changes to the **staging area** → `git commit` records a snapshot in the **local repository** → `git push` uploads commits to the **remote**. `git pull` (= fetch + merge) brings remote changes down. The three areas (working, staging, committed) let you craft precise commits. You branch off main, commit work, push, and open a PR to merge back.
+
+**Q228. What is the difference between `git merge` and `git rebase`?**
+`merge` combines branches by creating a merge commit, preserving the true history (branchy graph). `rebase` replays your commits on top of another branch, producing a linear history but *rewriting* commit hashes. Merge is safe and non-destructive; rebase is cleaner but should never be done on shared/public branches (it rewrites history others may have). Common rule: rebase local feature branches, merge into main.
+
+**Q229. What is a pull request (PR) and why is it central to GitHub workflow?**
+A PR proposes merging one branch into another, providing a place for code review, discussion, automated checks (CI, security scans), and approval before merge. It's central because it enforces quality and collaboration: nothing reaches main without review and passing checks. In finance, PRs give the audit trail and segregation of duties (author ≠ approver) that compliance requires.
+
+**Q230. What are the common Git branching strategies?**
+- **GitHub Flow** — simple: branch off main, PR, merge, deploy; main always deployable. Great with CI/CD.
+- **Git Flow** — main + develop + feature/release/hotfix branches; structured but heavier, suits scheduled releases.
+- **Trunk-based development** — very short-lived branches merged to main daily behind feature flags; best for high-frequency CI/CD.
+Modern DevOps favors GitHub Flow / trunk-based for velocity; regulated release cadences sometimes still use Git Flow.
+
+**Q231. How do you resolve a merge conflict?**
+A conflict happens when two branches change the same lines. Git marks the conflict (`<<<<<<<`, `=======`, `>>>>>>>`); you open the file, choose/combine the correct content, remove the markers, then `git add` the resolved files and complete the merge/commit. Tools/IDEs help visualize it. Prevent conflicts by merging main frequently and keeping branches short-lived and small.
+
+**Q232. What is `git rebase -i` (interactive rebase) used for?**
+Interactive rebase lets you rewrite a series of local commits — reorder, `squash` (combine), `reword` messages, `edit`, or `drop` commits — to clean up history before pushing/opening a PR. E.g. squash five "wip" commits into one meaningful commit. Only do it on unpushed/private branches, since it rewrites history.
+
+**Q233. Difference between `git reset`, `git revert`, and `git checkout/restore`?**
+- `git revert` — creates a *new* commit that undoes a previous one; safe for shared history (doesn't rewrite).
+- `git reset` — moves the branch pointer back (`--soft` keeps changes staged, `--mixed` unstages, `--hard` discards); rewrites history, use on local only.
+- `git restore`/`checkout` — discards working-directory changes or switches branches.
+Rule: use `revert` to undo on shared branches, `reset` for local cleanup.
+
+**Q234. What is `git cherry-pick`?**
+It applies a specific commit from one branch onto another without merging the whole branch. Common use: apply a hotfix commit from a release branch onto main (or vice versa), or pull one needed change from a feature branch. It copies the change as a new commit on the target branch.
+
+**Q235. What is `git stash`?**
+`git stash` temporarily shelves uncommitted changes so you can switch context (e.g. jump to a hotfix) with a clean working directory, then `git stash pop` to restore them. Useful when you're mid-work and need to quickly do something else without committing half-finished code.
+
+**Q236. What is `.gitignore` and why does it matter for security?**
+`.gitignore` specifies files/patterns Git should not track (build artifacts, `node_modules`, `.tfstate`, `.env`, secrets, credentials). It matters for security because it prevents accidentally committing sensitive files. But note: it only ignores *untracked* files — already-committed secrets stay in history and must be purged (e.g. `git filter-repo`) and rotated. Combine with secret-scanning to catch leaks.
+
+**Q237. What are GitHub branch protection rules?**
+Rules on important branches (main) that enforce quality/governance: require PR reviews (e.g. 2 approvals), require status checks (CI/tests/scans) to pass, require up-to-date branches, restrict who can push, require signed commits, and disallow force-push/deletion. In finance they enforce segregation of duties and an auditable change process — no one merges unreviewed code to main.
+
+**Q238. What are CODEOWNERS files?**
+A `CODEOWNERS` file maps paths/files to responsible reviewers/teams. When a PR touches those paths, the owners are automatically requested (and can be *required*) as reviewers. It ensures the right experts review changes to critical areas (e.g. security config, payment modules) and supports compliance by enforcing mandatory review by designated owners.
+
+**Q239. What is GitHub Actions?**
+GitHub's built-in CI/CD and automation platform. You define **workflows** in YAML (`.github/workflows/`) triggered by events (push, PR, schedule, manual). Workflows contain **jobs** (run on runners) made of **steps** that run commands or reusable **actions**. It integrates natively with the repo — no separate CI server — and is a common alternative/complement to Jenkins for build/test/deploy and automation.
+
+**Q240. Explain the structure of a GitHub Actions workflow.**
+```yaml
+name: CI
+on: [push, pull_request]      # events that trigger it
+jobs:
+  build:
+    runs-on: ubuntu-latest    # runner
+    steps:
+      - uses: actions/checkout@v4      # a reusable action
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - run: pytest                    # a shell command step
+```
+Key parts: `on` (triggers), `jobs` (run in parallel by default), `runs-on` (runner), `steps` (`uses` an action or `run` a command).
+
+**Q241. Jobs vs steps, and how do you control job order?**
+A **step** is a single task within a job (run a command or use an action); steps in a job run sequentially on the same runner sharing the workspace. **Jobs** run in parallel by default on separate runners. Use `needs:` to make one job depend on another (`deploy` needs `test`), creating a pipeline order. Data passes between jobs via outputs or artifacts, since they don't share a filesystem.
+
+**Q242. How do you manage secrets in GitHub Actions?**
+Store them in GitHub encrypted **Secrets** (repo, environment, or org level), reference as `${{ secrets.NAME }}` — never hardcode. Use **environment protection rules** with required reviewers for prod secrets, scope secrets to environments, and prefer **OIDC** to get short-lived cloud credentials instead of storing long-lived cloud keys. Secrets are masked in logs. This is critical for finance to avoid leaked credentials.
+
+**Q243. What is OIDC in GitHub Actions and why prefer it?**
+OpenID Connect lets a workflow request a short-lived token from your cloud provider (AWS/Azure/GCP) by establishing trust, so you don't store long-lived cloud access keys as secrets. The credentials are ephemeral and scoped, dramatically reducing the risk and blast radius of leaked keys. It's the recommended, more secure way to authenticate CI/CD to the cloud — and auditors love it.
+
+**Q244. What are GitHub Actions runners (GitHub-hosted vs self-hosted)?**
+**GitHub-hosted** runners are managed, ephemeral VMs GitHub provides (fresh environment each run, no maintenance). **Self-hosted** runners are machines you manage — used when you need specific hardware, private-network access, custom software, or compliance/data-residency control. Finance clients often use self-hosted runners inside their network so builds never leave their controlled environment; secure and isolate them (ephemeral, least privilege).
+
+**Q245. How do you cache dependencies and use artifacts in Actions?**
+Use `actions/cache` to persist dependencies (pip, npm, Docker layers) across runs keyed on a hash of the lockfile — speeds up builds. Use `actions/upload-artifact` / `download-artifact` to pass build outputs (binaries, test reports) between jobs or store them for later. Caching improves lead time; artifacts enable multi-job pipelines and "build once, deploy many."
+
+**Q246. What is a matrix build in GitHub Actions?**
+A matrix runs the same job across multiple parameter combinations in parallel — e.g. test against Python 3.10/3.11/3.12 on Linux/Windows. Defined via `strategy: matrix:`. It gives broad compatibility coverage efficiently. `fail-fast` controls whether one failing combination cancels the rest.
+
+**Q247. How do you deploy safely to production with GitHub Actions?**
+Use **environments** with protection rules: required reviewers (manual approval gate for prod), wait timers, and environment-scoped secrets. Combine with branch protection, run tests/security scans as required checks, deploy via canary/blue-green, and use OIDC for short-lived creds. The approval gate + environment scoping + audit log gives the controlled, auditable prod deploy finance needs.
+
+**Q248. What are reusable workflows and composite actions?**
+- **Reusable workflows** — a whole workflow called by others (`uses: org/repo/.github/workflows/x.yml@ref`), so many repos share one standardized pipeline (DRY, central governance).
+- **Composite actions** — bundle multiple steps into one custom action for reuse.
+Both reduce duplication and let a platform team enforce consistent, secure pipelines across many repositories.
+
+**Q249. Jenkins vs GitHub Actions — when would you choose each?**
+GitHub Actions: native to GitHub, no server to maintain, great for repo-scoped CI/CD, fast to set up, large marketplace. Jenkins/CloudBees: self-hosted control, mature plugin ecosystem, complex enterprise pipelines, existing on-prem/legacy integrations, and strong enterprise governance (CloudBees). Many enterprises use both — Actions for lightweight repo automation, Jenkins/CloudBees for centralized, heavily-governed enterprise pipelines. Choose by control needs, existing investment, and governance requirements.
+
+**Q250. How does GitHub support security and compliance (relevant to finance)?**
+Features: branch protection + required reviews (segregation of duties, audit trail), CODEOWNERS (mandatory expert review), **Dependabot** (dependency vuln alerts + auto-update PRs), **code scanning** (CodeQL SAST), **secret scanning** with push protection (blocks committing secrets), signed commits, environment protection rules, fine-grained permissions, and org **audit logs**. Together they build a secure, auditable software supply chain — exactly what a regulated financial client expects.
