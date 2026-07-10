@@ -1,3 +1,520 @@
+# EPAM SRE/DevOps — Scenario-Based Interview Answers (with likely counter-questions)
+### Observability · Monitoring · Kubernetes · CI/CD · Cloud · Python · Dynatrace dashboards
+
+> How to use: read each answer out loud until it's natural. The **"Likely follow-ups"** are the counter-questions an EPAM interviewer typically fires after your first answer — prep those so you're never caught flat. The **"Questions you can ask back"** show curiosity and seniority.
+
+---
+
+## 1) Scenario questions — Observability, Monitoring, K8s, CI/CD
+
+Interviewers rarely ask "what is X"; they give a situation. Here are the common ones with crisp answers.
+
+**S1. "Users report the app is slow but all your dashboards are green. What do you do?"**
+Green dashboards with unhappy users usually means I'm measuring the wrong thing. I check: (a) am I measuring *user-facing* latency (RUM/synthetic from the client) or only server-side? Server can be fast while the CDN, DNS, TLS, or a downstream is slow. (b) Are averages hiding the tail — check p95/p99, not the mean. (c) Is it a specific segment (region, endpoint, customer)? I slice by dimension. (d) Are my SLIs even tied to the real user journey? Often the fix is adding a synthetic check on the actual journey and switching alerts to percentiles. Lesson: monitor symptoms users feel, not just infra health.
+
+**S2. "You get paged for high error rate. Walk me through your first 10 minutes."**
+Acknowledge the page, open the service dashboard, confirm it's real (not a monitoring glitch) and scope the impact (which endpoint, how many users, since when). Check the #1 suspect — **recent change** (deploy/config/infra in the last hour). Look at golden signals: errors + latency + saturation, and the trace to find the failing span/dependency. If a bad deploy correlates, roll back immediately (mitigate first). Communicate status. Only after service is restored do I dig into full root cause. Restore first, RCA later.
+
+**S3. "A microservice intermittently returns 500s only under load. How do you find the cause?"**
+Intermittent-under-load points to saturation or a resource limit. I check: CPU throttling (K8s CPU limits too low → throttled under load), memory pressure / OOM, connection-pool or thread-pool exhaustion, DB connection limits, and downstream timeouts. Distributed tracing (Dynatrace PurePath) shows which span slows/fails under load. I reproduce with a load test in staging, watch saturation metrics, and fix the actual bottleneck (raise limits, tune pool, add replicas/HPA). Classic hidden culprit: CPU limits causing throttling.
+
+**S4. "How would you set up monitoring for a brand-new service from scratch?"**
+Start from the user journey → define SLIs (availability, latency, correctness) and SLOs on it. Instrument the four golden signals (latency, traffic, errors, saturation). Add infra metrics (node/pod CPU/mem/disk), centralized structured logs, and distributed tracing (OpenTelemetry). Add synthetic checks for proactive detection and RUM for real experience. Build an SLO dashboard, then create *symptom-based* alerts with burn-rate thresholds and runbooks. Only alert on what threatens the SLO.
+
+**S5. "Your CI pipeline suddenly takes 40 minutes instead of 10. How do you fix it?"**
+Profile the pipeline — which stage got slow? Common causes and fixes: no dependency/Docker-layer caching (add caching), serial stages (parallelize independent ones), a bloated test suite (split/shard, run only affected tests), huge images (slim base images), cold runners (pre-warmed/ephemeral agents), or a slow external dependency (mock in tests). Fail fast — run cheap linters/unit tests before slow integration tests. I'd measure before/after to prove the improvement (lead-time is a DORA metric).
+
+**S6. "A deployment to prod caused an outage. What's your immediate action and long-term fix?"**
+Immediate: roll back to the last known-good version (fastest recovery — `kubectl rollout undo` or blue-green switch), confirm recovery, communicate. Long-term: blameless postmortem — why didn't the pipeline catch it? Add the missing guardrail: canary deployment with automated metric-based rollback, better tests/quality gates, or config validation. Change is the #1 cause of incidents, so the real fix is making bad changes fail *safely in the pipeline*, not in prod.
+
+**Likely follow-ups for this whole section:** "What's an SLI vs SLO?", "How do you avoid alert fatigue?", "Symptom vs cause-based alerting?", "What's a burn-rate alert?" — all answered in your main 250-Q&A doc (Section 1 & 4).
+
+---
+
+## 2) Complete CI/CD flow: dev commit → production (architecture + commands)
+
+**Say this as a narrative, then offer to draw it.**
+
+**Architecture (left to right):**
+Developer → Git (GitHub) → CI server (GitHub Actions / Jenkins) → Artifact + Container Registry (Nexus/Artifactory/ECR) → CD/GitOps (Argo CD or pipeline `kubectl`/`helm`) → Kubernetes (Dev → QA → Staging → Prod) → Observability (Dynatrace/Splunk/Grafana) feeding back to the team.
+
+**Stage-by-stage flow with commands:**
+
+1. **Code & commit (developer's machine)**
+```bash
+git checkout -b feature/payments-fix
+# ...edit code...
+git add .
+git commit -m "fix: handle null in payment validation"
+git push origin feature/payments-fix
+```
+Developer opens a **Pull Request** to `main`.
+
+2. **CI triggers on the PR** (branch protection requires checks to pass):
+   - Checkout → build → unit tests → static analysis (SonarQube) → security scans (SAST + SCA/dependency + secret scan) → build container image.
+```bash
+# inside the pipeline
+mvn clean verify                       # or npm test / pytest
+sonar-scanner                          # code quality gate
+trivy image myapp:${GIT_SHA}           # image vuln scan
+docker build -t registry/myapp:${GIT_SHA} .
+docker push registry/myapp:${GIT_SHA}  # immutable, SHA-tagged artifact
+```
+   - Reviewers approve, checks pass → **merge to main**.
+
+3. **CD to lower environments (automatic)** — deploy the *same* image, promote it upward:
+```bash
+kubectl set image deployment/myapp myapp=registry/myapp:${GIT_SHA} -n dev
+# or Helm:
+helm upgrade --install myapp ./chart -n dev \
+  --set image.tag=${GIT_SHA} --wait
+```
+   - Run smoke/integration tests in dev → promote to QA → staging (same image, never rebuilt).
+
+4. **Manual approval gate before prod** (finance = change control + segregation of duties + audit trail).
+
+5. **Prod deploy with a safe strategy** (canary/blue-green):
+```bash
+helm upgrade --install myapp ./chart -n prod --set image.tag=${GIT_SHA} --wait
+kubectl rollout status deployment/myapp -n prod    # verify rollout health
+```
+   - Or GitOps: bump the image tag in the Git repo; **Argo CD** reconciles the cluster to match Git (deploy by merge, rollback by revert).
+
+6. **Post-deploy verification & monitoring** — automated health/smoke checks + watch Dynatrace SLIs; auto-rollback if error/latency SLI degrades:
+```bash
+kubectl rollout undo deployment/myapp -n prod      # instant rollback if needed
+```
+
+**One-liner summary to say:** "Build once, tag by commit SHA, promote the *same immutable artifact* through environments with automated gates and scans, deploy to prod behind an approval + canary with automated rollback, and verify against SLIs in Dynatrace."
+
+**Likely follow-ups:** "How do you handle DB migrations in this flow?" (Flyway/Liquibase, expand-contract, backward-compatible). "Where do secrets come from?" (Vault/Key Vault, OIDC, never in code). "How is this auditable for finance?" (every change is a reviewed Git commit; approvals + deploys logged).
+
+---
+
+## 3) "Which deployment tool have you used?" (e.g. "I used GitHub Actions")
+
+**Sample confident answer (adapt to your real experience):**
+"I've primarily used **GitHub Actions** for CI/CD — workflows in YAML triggered on push and PR, with jobs for build, test, SonarQube quality gate, Trivy image scan, and deploy. For prod I use GitHub **environments** with required-reviewer protection and **OIDC** to get short-lived cloud credentials instead of storing long-lived keys. I've also worked with **Jenkins/CloudBees** declarative pipelines (Jenkinsfile) in more governed setups, and for Kubernetes delivery I've used **Helm** and **Argo CD (GitOps)**. For infra, **Terraform**."
+
+Be honest about depth — name what you've *actually* touched, and for the rest say "I've used the fundamentals and I'm deepening it." EPAM values honesty + learning ability over bluffing.
+
+**Likely follow-ups:** "GitHub Actions vs Jenkins — when would you pick each?" (Actions = native, low-maintenance, repo-scoped; Jenkins/CloudBees = heavy enterprise governance, plugins, on-prem). "How do you secure Actions?" (encrypted secrets, environment protection, OIDC, self-hosted runners inside the network for finance). "What's a matrix build / reusable workflow?"
+
+**Question you can ask back:** "Is the team standardized on one CI/CD tool, or migrating between them?"
+
+---
+
+## 4) Master/control-plane node failure — what happens to worker nodes and running apps? (VERY commonly asked)
+
+**The key insight to state first:** In Kubernetes the **control plane and the data plane are decoupled**. The control plane *decides*; the worker nodes *run the workloads*. So if the control plane goes down, **already-running applications keep running and serving traffic** — because the kubelet on each worker keeps its existing pods alive and kube-proxy keeps routing with its last-known rules.
+
+**What KEEPS working when the control plane is down:**
+- Existing pods keep running (kubelet manages them locally).
+- Traffic to those pods keeps flowing (kube-proxy / service routing uses last-known endpoints).
+- In-node self-restart of a crashed *container* still works (kubelet restarts containers per the pod spec, using cached local state).
+
+**What STOPS working (because it needs the control plane):**
+- **`kubectl` commands fail** — the API server is the front door; if it's down you can't read or change anything.
+- **No new scheduling** — the scheduler is down, so new pods can't be placed.
+- **No self-healing across nodes** — if a pod (or a whole node) dies, the controller-manager/scheduler that would reschedule it elsewhere is down, so it won't be replaced.
+- **No scaling** — HPA can't add replicas; Cluster Autoscaler can't add nodes.
+- **No new deployments / rollouts / config changes.**
+- **Service endpoints won't update** — if pods change, the Endpoints/EndpointSlices won't refresh, so routing can go stale.
+
+**Nuances to mention (this impresses interviewers):**
+- **etcd matters most.** If only the API server is down but **etcd is intact**, the cluster state is safe and everything recovers when the control plane comes back. If **etcd is lost/corrupted**, that's catastrophic — the cluster's entire state is gone; you restore from an etcd backup. So: *back up etcd regularly.*
+- **If a worker node dies while the control plane is down**, its pods are gone and **won't be rescheduled** until the control plane returns — that's when you actually lose capacity/availability for those pods.
+- **HA control plane fixes this.** Run 3 (or 5) control-plane nodes with an **etcd quorum**. Losing one of three keeps the cluster fully operational — that's why production clusters never run a single master.
+- **Node status:** the node-controller (part of the control plane) is what marks nodes NotReady after the grace period. With the control plane down, nothing updates node status; on recovery it reconciles.
+
+**One-liner to close with:** "Running apps stay up because the data plane is independent — but you lose the cluster's *brain*: no scheduling, healing, scaling, or changes. That's why we run an HA, multi-node control plane with quorum etcd and regular etcd backups."
+
+**Likely follow-ups:** "What is etcd and how do you back it up?" (`etcdctl snapshot save`). "How many control-plane nodes for HA and why odd numbers?" (quorum: 3 tolerates 1 failure, 5 tolerates 2). "What if etcd loses quorum?" (cluster becomes read-only/unavailable for writes until quorum restored).
+
+---
+
+## 5) Troubleshooting common K8s errors (CrashLoopBackOff, OOMKilled, ImagePullBackOff, Pending)
+
+**General first move for any pod problem:**
+```bash
+kubectl get pods -n <ns>                          # see status + restart count
+kubectl describe pod <pod> -n <ns>                # Events + Last State + exit code
+kubectl logs <pod> -n <ns> --previous             # logs from the crashed container
+kubectl top pod <pod> -n <ns>                      # live CPU/mem usage
+```
+
+**CrashLoopBackOff** — the container starts, crashes, and K8s keeps restarting it with increasing backoff.
+- Diagnose: `kubectl logs --previous` for the crash reason; `describe` for exit code and events.
+- Common causes: application error/exception on startup, bad/missing config or secret or env var, missing dependency (DB not reachable), failing DB migration, wrong command/entrypoint, or an **over-aggressive liveness probe** killing a slow-starting app (fix with a startup probe or longer `initialDelaySeconds`).
+- Exit codes help: `1` = app error, `137` = OOMKilled (SIGKILL), `143` = SIGTERM.
+
+**OOMKilled (exit 137)** — the container exceeded its memory limit and the kernel killed it.
+- Diagnose: `describe` shows `Reason: OOMKilled`; `kubectl top pod` shows memory near the limit.
+- Fixes: raise the memory `limit` if it was genuinely too low; or fix a **memory leak** in the app (see #6); ensure `requests` and `limits` are set sensibly; check for a load spike needing more replicas (HPA).
+
+**ImagePullBackOff / ErrImagePull** — can't pull the container image.
+- Causes: wrong image name/tag, private registry without a valid `imagePullSecret`, registry down, or rate-limited.
+- Fix: verify the tag exists, check/create the pull secret, confirm registry auth and connectivity.
+
+**Pending** — pod can't be scheduled.
+- Causes: insufficient node resources (no node satisfies CPU/mem requests), nodeSelector/affinity/taints with no matching node, or an unbound PVC (storage not available).
+- Fix: `describe` reads the scheduler event; adjust requests, add nodes (autoscaler), fix affinity/taints/tolerations, or provision the PVC.
+
+**CreateContainerConfigError** — usually a missing ConfigMap/Secret referenced by the pod. Fix the reference or create the missing object.
+
+**Say the method, not just the list:** "I always start with `describe` for events and exit code, then `logs --previous`, then narrow by symptom — config, resources, image, or scheduling."
+
+**Likely follow-ups:** "Difference between liveness and readiness probe?" "What does exit code 137 mean?" "How do requests vs limits affect scheduling and OOM?"
+
+---
+
+## 6) How would you fix an Out-of-Memory (OOM) issue specifically?
+
+**Structure the answer as: confirm → contain → root-cause → prevent.**
+
+1. **Confirm it's really OOM.** In K8s: `kubectl describe pod` shows `Reason: OOMKilled`, exit code `137`, and rising restart count; `kubectl top pod` shows memory pegged at the limit. On a Linux host: `dmesg | grep -i oom` or `journalctl -k` shows the kernel OOM-killer entry.
+
+2. **Contain / stabilize immediately** (restore service first):
+   - Restart or scale out (more replicas) to relieve pressure.
+   - If the limit was set too low for legitimate usage, raise the memory `limit` (and `request`) as a quick fix.
+   - Add an alert on memory saturation so it's caught earlier next time.
+
+3. **Root-cause — is it under-provisioning or a leak?**
+   - **Under-provisioning:** the app genuinely needs more memory than the limit → right-size the limit based on observed usage + headroom, and/or add replicas.
+   - **Memory leak:** memory climbs steadily over time and never drops until the crash (sawtooth: rises, OOMKilled, restarts, rises again). This is a code bug — profile it: for Java use heap dumps (`jmap`, analyze in MAT) and check GC logs; for Python use `tracemalloc`/`objgraph`; for Node use `--inspect`/heap snapshots. Find what's retaining objects (unbounded cache, unclosed connections, growing collection) and fix it.
+
+4. **Prevent recurrence:**
+   - Set correct `requests`/`limits` (limits prevent one pod from taking down a node; requests ensure proper scheduling).
+   - Add memory-saturation alerts and dashboards.
+   - Load/soak test before release to catch leaks in CI/staging.
+   - For the JVM, tune heap (`-Xmx`) *below* the container limit and make it container-aware so the JVM respects cgroup limits.
+
+**One-liner:** "First confirm OOMKilled via describe/exit-137, stabilize by scaling or raising the limit, then decide if it's under-provisioning (right-size) or a genuine leak (profile with heap dumps and fix the retention), and prevent it with correct limits, saturation alerts, and soak testing."
+
+**Likely follow-ups:** "How is memory limit different from request?" "What's the sawtooth pattern telling you?" "How do you make a JVM container-aware?"
+
+---
+
+## 7) Difference between memory and storage
+
+Keep it crisp — they want to know you understand the fundamentals.
+
+- **Memory (RAM)** is **volatile, fast, temporary** working space the CPU uses for currently-running processes and data. It's cleared when the process/host restarts. Small capacity, very high speed, more expensive per GB. In K8s: a pod's `memory` request/limit; exceeding it → OOMKilled.
+- **Storage (disk)** is **persistent, slower, permanent** — it retains data across restarts (files, databases, logs). Large capacity, lower speed, cheaper per GB. In K8s: PersistentVolumes/PVCs, mounted so data survives pod restarts.
+
+**Analogy to say:** "Memory is your desk — fast to reach but small and cleared when you leave. Storage is your filing cabinet — slower to fetch from, but it keeps everything permanently." 
+
+**Why it matters operationally:** a memory problem (OOM) crashes processes; a storage problem (disk full) can crash the node, stop logging, or corrupt data. They're monitored and fixed differently — OOM → limits/leaks; disk-full → cleanup/rotation/expand volume.
+
+**Likely follow-ups:** "What happens when a node's disk fills up?" (kubelet evicts pods, DiskPressure taint, logging stops). "Persistent vs ephemeral storage in K8s?" (PV/PVC vs emptyDir/container filesystem).
+
+---
+
+## 8) Which deployment strategy did you use? (blue-green / canary / rolling / rollback)
+
+**Sample answer (adapt to your project):**
+"In my project we used **rolling updates** as the default in Kubernetes for most services, and **canary** for higher-risk, customer-facing changes — especially in the financial flows where blast radius matters."
+
+Then explain each so you can go deep on any:
+
+- **Rolling update (K8s default):** replaces pods gradually — new pods come up (respecting `maxSurge`) and old ones drain (respecting `maxUnavailable`), waiting for readiness between batches. Zero-downtime, no extra infra. Downside: harder to roll back mid-way, and both versions serve traffic briefly.
+
+- **Blue-green:** two identical environments — Blue (live), Green (new). Deploy and test on Green, then flip the load balancer from Blue to Green instantly. Instant rollback (flip back). Cost: double infrastructure during the switch. Great when you need an all-at-once cutover and instant rollback.
+
+- **Canary:** release to a small % of traffic (e.g. 5%), watch the SLIs/errors, then progressively increase (25→50→100%) or auto-roll-back if metrics degrade. Smallest blast radius, validates on real traffic. Often automated with Argo Rollouts / Flagger driven by Prometheus/Dynatrace metrics.
+
+- **Rollback:** returning to the last known-good version. In K8s: `kubectl rollout undo`. In blue-green: flip back. In GitOps: revert the Git commit. Key enabler: **immutable, versioned artifacts** so "previous good" is always redeployable.
+
+**How to pick (say this):** "Choose by risk, cost, and rollback needs — rolling for routine low-risk, blue-green when you need instant cutover/rollback and can afford double infra, canary for high-risk changes where I want to validate on a slice of real traffic first."
+
+**Likely follow-ups:** "How does canary decide to promote or roll back?" (automated metric analysis on SLIs — error rate, latency). "How do DB schema changes complicate blue-green/rollback?" (use backward-compatible expand-contract migrations so app can roll back independently).
+
+---
+
+## 9) How do you roll back in Kubernetes with ZERO downtime?
+
+**Core mechanism:**
+```bash
+kubectl rollout history deployment/myapp -n prod        # see revisions
+kubectl rollout undo deployment/myapp -n prod           # revert to previous
+kubectl rollout undo deployment/myapp -n prod --to-revision=3   # specific one
+kubectl rollout status deployment/myapp -n prod         # confirm healthy
+```
+
+**Why it's zero-downtime:** `rollout undo` triggers another **rolling update** back to the previous ReplicaSet. K8s brings the old-version pods up and only removes the new-version pods **after the old ones pass their readiness probe**, controlled by `maxSurge`/`maxUnavailable`. Traffic is only routed to Ready pods, so users never hit a gap — provided you have:
+- **Correct readiness probes** (so traffic isn't sent to a pod that isn't ready),
+- **Multiple replicas** + a PodDisruptionBudget (so some pods always serve),
+- **`maxUnavailable: 0`** (or low) if you want strictly no capacity dip during the rollback,
+- **Backward-compatible DB schema** (expand-contract) so the old app version still works against the current schema.
+
+**Even faster/safer options:**
+- **Blue-green:** flip the Service/ingress back to the old (Blue) environment — instant, atomic.
+- **GitOps:** `git revert` the change; Argo CD reconciles back to the previous state (auditable rollback).
+- **Argo Rollouts / canary:** automatic rollback when metric analysis fails, before full traffic shift.
+
+**One-liner:** "`kubectl rollout undo` does a rolling revert to the previous ReplicaSet; it's zero-downtime because new (old-version) pods must pass readiness before the bad pods are removed, and I keep multiple replicas, a PDB, and backward-compatible schemas so there's never a serving gap."
+
+**Likely follow-ups:** "What if the bad version already ran a destructive DB migration?" (why expand-contract matters; may need data restore). "How does readiness probe prevent downtime here?" "Difference between rollout undo and blue-green rollback?"
+
+---
+
+## 10) AWS & Azure — two subnets need to communicate. How do you connect them? (+ VPC peering)
+
+**First, clarify the scope — this shows maturity.** "Are the two subnets in the *same* VPC/VNet, or in *different* ones (or different accounts/regions)? The answer differs."
+
+**Case A — two subnets in the SAME VPC/VNet:**
+They can already route to each other by default (a VPC/VNet has a local route). So communication just needs:
+- The **route table** to have the local route (present by default).
+- **Security groups / NSGs** and (AWS) **NACLs** to *allow* the traffic on the required ports.
+So it's usually a security-rule question, not a routing one. If they can't talk, check SG/NSG/NACL rules first.
+
+**Case B — subnets in DIFFERENT VPCs/VNets → use peering:**
+- **AWS: VPC Peering** — a direct, private network connection between two VPCs so resources communicate using private IPs as if on the same network. Steps: create the peering connection, **accept** it on the other side, then **add routes** in both VPCs' route tables pointing each other's CIDR to the peering connection, and open **security groups/NACLs**. Works across accounts and across regions.
+- **Azure: VNet Peering** — the equivalent between two VNets; low-latency, private-IP connectivity. You peer VNet A→B and B→A (both directions), and it can be regional or **global** (across regions).
+
+**Key VPC peering facts to state:**
+- Traffic stays on the private cloud backbone (not the public internet) — secure and low-latency.
+- **CIDR ranges must not overlap** — overlapping IP ranges can't be peered.
+- **Peering is NOT transitive** — if A↔B and B↔C are peered, A cannot reach C through B. You'd need A↔C directly, or use a hub.
+- For many VPCs, peering becomes a mesh nightmare → use a **hub-and-spoke** with **AWS Transit Gateway** (or **Azure Virtual WAN / hub VNet**) to centralize connectivity.
+
+**Other connectivity options (mention if pushed):** Transit Gateway (many VPCs), VPN or Direct Connect/ExpressRoute (to on-prem), PrivateLink (expose a specific service privately without full network peering).
+
+**One-liner:** "Same VPC — they already route; I just open the security groups. Different VPCs — VPC peering (VNet peering in Azure) for private-IP connectivity, remembering non-overlapping CIDRs, non-transitive routing, and route-table + security-group updates on both sides; at scale I move to a Transit Gateway hub."
+
+**Likely follow-ups:** "Is VPC peering transitive?" (No.) "What if CIDRs overlap?" (Can't peer — re-IP or use PrivateLink/NAT.) "Peering vs Transit Gateway?" (Peering = 1:1, mesh at scale; TGW = hub for many.) "How to connect to on-prem?" (VPN / Direct Connect / ExpressRoute.)
+
+---
+
+## 11) Which monitoring tools have you used?
+
+**Sample answer (adapt to what you've truly used):**
+"**Dynatrace** as the primary full-stack observability/APM tool — OneAgent auto-instrumentation, PurePath distributed tracing, Smartscape topology, Davis AI for automatic root-cause, plus SLO tracking and dashboards. **Splunk** for centralized log aggregation and analysis with SPL, and for security/audit use cases. **Prometheus + Grafana** for Kubernetes/cloud-native metrics with PromQL and Alertmanager, and Grafana dashboards. I've also touched cloud-native monitoring — **CloudWatch / Azure Monitor**."
+
+Tie it to *what you did with them*, not just names: "I defined SLOs in Dynatrace, built golden-signal dashboards, wrote Splunk alerts for failed transactions, and set up Prometheus burn-rate alerts."
+
+**Likely follow-ups:** "Metrics vs logs vs traces — when do you use each?" "How do Prometheus and Grafana relate?" "What's Davis AI / PurePath?" — all in your main 250-Q&A doc, Section 4.
+
+---
+
+## 12 & 13) Creating dashboards — Splunk/Grafana AND the Dynatrace end-to-end steps (HEAVILY asked)
+
+**Short answer first:** "Yes — I build dashboards for specific endpoints and indexes regularly. Let me walk you through how I'd do it end to end in Dynatrace, and I can also do it in Grafana/Splunk."
+
+### Dynatrace dashboard — end-to-end steps (know this cold)
+
+**Goal example:** a dashboard showing availability, latency (p90/p99), error rate, and throughput for a specific service/endpoint, plus an SLO tile.
+
+1. **Ensure data is flowing.** Deploy **OneAgent** on the hosts (or via the Kubernetes/Operator install) so Dynatrace auto-discovers the service and captures metrics + PurePath traces. Confirm the service appears under **Services**.
+
+2. **Identify/scope the entity.** Find your service or specific endpoint (request) under Services. Optionally create a **Management Zone** to scope the dashboard to just this application/team (important in finance for access separation).
+
+3. **Create the dashboard.** Go to **Dashboards → Create dashboard** (or use the newer Dashboards app). Give it a name.
+
+4. **Add tiles for the golden signals**, each scoped to your service/endpoint:
+   - **Availability / Failure rate** — add a tile using the service's failure-rate metric.
+   - **Response time** — tile showing **p50/p90/p99** (percentiles, not average).
+   - **Throughput** — requests/min.
+   - **Errors** — failure count/rate, optionally split by HTTP status.
+   - Use **filters** to pin the tile to a specific endpoint/request or entity, and split by dimension (endpoint, geo) where useful.
+
+5. **Add an SLO tile.** First create the SLO (**Service-Level Objectives → Add SLO**): pick the SLI (e.g. availability from the service success rate, or latency), set the target (e.g. 99.9%) and evaluation window; then add its tile to the dashboard to show attainment + error-budget burn.
+
+6. **Use DQL / metric selectors (modern Dynatrace)** for custom tiles — e.g. a **Data Explorer** tile where you pick the metric, apply filters (management zone, service, endpoint), choose the aggregation (percentile/avg/count), and visualize as graph/single-value/table. In the newest platform this is **DQL (Dynatrace Query Language)** in a Notebook/Dashboard tile.
+
+7. **Set up alerting on it.** Configure **anomaly detection / custom alerts** (or metric events) so threshold or burn-rate breaches page on-call — Davis AI also auto-detects anomalies and correlates root cause.
+
+8. **Share & manage access.** Share the dashboard with the team/management, restrict via management zones/permissions, and mark it as a report for periodic management reporting (a JD requirement).
+
+**One-liner:** "Get OneAgent reporting the service, scope it with a management zone, create a dashboard, add golden-signal tiles (failure rate, p90/p99 latency, throughput, errors) filtered to the endpoint, add an SLO + error-budget tile, build custom tiles with the metric selector/DQL, wire alerts, and share it with the right access."
+
+### Splunk dashboard — for specific indexes (quick version)
+- Write an SPL search scoped to the index/sourcetype, e.g.:
+  `index=payments sourcetype=api endpoint="/pay" | timechart span=5m count by status`
+- Save it as a **dashboard panel** (Save As → Dashboard Panel). Repeat for error rate, latency, volume.
+- Use tokens/dropdowns for interactive filtering (pick endpoint/time). Add panels for p95 latency (`| stats perc95(response_time)`), failed transactions, etc.
+
+### Grafana dashboard (with Prometheus)
+- Add Prometheus as a data source, create a dashboard, add panels with PromQL:
+  - Error ratio: `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))`
+  - p99 latency: `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))`
+- Add template variables (e.g. `$endpoint`, `$namespace`) for reusable, filterable dashboards; add alert rules.
+
+**Likely follow-ups:** "How do you show p99 vs average and why?" "How do you scope a dashboard to one endpoint?" "How do you turn a dashboard metric into an alert?" "What's an SLO tile / error budget?"
+
+**Question you can ask back:** "Is the team standardized on Dynatrace for APM and Splunk for logs, or is there overlap I should be aware of?"
+
+---
+
+## 14) Python coding — reverse the string but keep `#` positions fixed
+
+**The rule (state it clearly first):** "Reverse all the characters *except* `#`; every `#` stays exactly where it was."
+
+**Verified examples with one consistent rule:**
+- `abhinand#an` → `nadnanih#ba` ✅ (matches your example)
+- `krish#na` → `anhsi#rk` ✅ (this is the logically consistent answer; the `anhsr#ik` in the question has the two letters next to the `#` swapped — a small typo. Point this out in the interview — spotting it earns credit.)
+
+**Clean solution (best to write on the whiteboard):**
+```python
+def reverse_keep_hash(s: str) -> str:
+    # 1. take all non-'#' chars and reverse them
+    chars = [c for c in s if c != '#']
+    chars.reverse()
+    # 2. rebuild: keep '#' fixed, fill other positions from reversed chars in order
+    it = iter(chars)
+    return ''.join('#' if c == '#' else next(it) for c in s)
+
+print(reverse_keep_hash("krish#na"))       # anhsi#rk
+print(reverse_keep_hash("abhinand#an"))    # nadnanih#ba
+print(reverse_keep_hash("abhi"))           # ihba
+```
+
+**How it works (explain out loud):**
+1. Collect every character that is **not** `#` and reverse that list.
+2. Walk the original string left to right; wherever there's a `#`, output `#` (fixed); otherwise pop the next character from the reversed list. This preserves `#` positions while reversing the rest. Time complexity **O(n)**, space **O(n)**.
+
+**Alternative two-pointer solution (some interviewers prefer in-place):**
+```python
+def reverse_keep_hash_two_pointer(s: str) -> str:
+    a = list(s)
+    i, j = 0, len(a) - 1
+    while i < j:
+        if a[i] == '#':
+            i += 1
+        elif a[j] == '#':
+            j -= 1
+        else:
+            a[i], a[j] = a[j], a[i]
+            i += 1
+            j -= 1
+    return ''.join(a)
+```
+Two pointers from both ends; skip a pointer when it lands on `#`, otherwise swap. O(n) time, O(1) extra space (aside from the list). Mention this as the more memory-efficient version.
+
+**Likely follow-ups:**
+- "What's the time and space complexity?" → O(n) time; first version O(n) space, two-pointer O(1) extra.
+- "What if there are multiple `#`s?" → Both solutions handle any number of `#` at any positions — the `#`s all stay fixed.
+- "Can you do it in place?" → Yes, the two-pointer version.
+- "What about other special characters to fix, not just `#`?" → Generalize: `is_fixed = lambda c: c in FIXED_SET` and skip those.
+- "Reverse only letters, keep digits AND symbols fixed?" → Same pattern with `c.isalpha()` as the condition (this is literally LeetCode 917 "Reverse Only Letters").
+
+**Tip:** talk through your approach *before* coding, verify with the given example, then mention complexity and edge cases (empty string, all `#`, no `#`). That process is what they're grading, not just a working answer.
+
+---
+
+## General closing advice for these scenario rounds
+
+- **Clarify before answering** ("same VPC or different?", "already-running pods or new ones?") — it signals seniority and prevents wrong answers.
+- **Lead with the principle, then the commands.** Say *why* first ("control plane and data plane are decoupled"), then show `kubectl` proof.
+- **For incidents: mitigate first, root-cause later** — repeat this framing; EPAM loves it.
+- **Tie everything back to the finance context:** auditability, change control, blast radius, data integrity, low RTO/RPO.
+- **Be honest about depth.** For tools you've used lightly, say "I've used the fundamentals and I'm deepening it" — never bluff a command you can't explain.
+- **In coding: think out loud, verify against the example, state complexity, handle edge cases.**
+- **Always have 2-3 questions ready to ask back** (culture, on-call, tooling, SLO maturity).
+
+Good luck — practice the Dynatrace dashboard steps and the control-plane-failure answer especially, since those two came up explicitly.
+
+
+#4 Control-plane failure (they asked this explicitly): The one line that wins it — "control plane and data plane are decoupled." Running apps keep serving because kubelet + kube-proxy work locally. What breaks: kubectl, new scheduling, self-healing across nodes, scaling, and endpoint updates. Emphasize etcd (back it up; loss = catastrophic) and HA control plane (3/5 nodes, quorum). If a worker dies while the control plane is down, its pods won't reschedule until it's back.
+#13 Dynatrace dashboard (their favourite): OneAgent reporting → scope with a management zone → create dashboard → add golden-signal tiles (failure rate, p90/p99 latency, throughput, errors) filtered to the endpoint → add an SLO + error-budget tile → build custom tiles with the metric selector/DQL → wire alerts → share with access control. Memorize that sequence.
+#14 Python (verified by running it): One consistent rule — keep # fixed, reverse the rest. That gives abhinand#an → nadnanih#ba (matches you) and krish#na → anhsi#rk. Your prompt's anhsr#ik swaps the two letters beside the # — a typo. Flagging that in the interview is a plus. Two clean solutions in the doc: iterator-based (O(n) space) and two-pointer in-place (O(1) extra) — this is essentially LeetCode 917 "Reverse Only Letters."
+#10 VPC peering: Clarify same-VPC (already routes — just open security groups) vs different-VPC (peering). Non-overlapping CIDRs, not transitive, update route tables + security groups both sides; scale with Transit Gateway.
+Recurring framing that scores across all of them: clarify first, lead with the principle then the commands, mitigate-before-RCA, and tie back to finance (auditability, blast radius, data integrity).
+
+---
+# EPAM SRE/DevOps — Rapid-Revision Cheat Sheet
+### Read this 30 min before the interview. One-liners only.
+
+## Reliability core
+- **SLI** = measure (success ratio). **SLO** = internal target (99.9%). **SLA** = customer contract w/ penalties (looser than SLO).
+- **Error budget** = 100% − SLO. Budget left → ship fast. Budget gone → feature freeze (agreed policy).
+- **Golden signals** = Latency, Traffic, Errors, Saturation. RED = Rate/Errors/Duration. USE = Utilization/Saturation/Errors.
+- **Toil** = manual, repetitive, automatable ops work with no lasting value; keep < 50%; measure → prioritize → automate.
+- **DORA** = Deployment Frequency, Lead Time, Change Failure Rate, MTTR.
+- **Why not 100% SLO?** Impossible, infinitely costly, leaves zero room to ship. Alert on **burn rate** (multi-window).
+- **Latency:** use p95/p99, never average (tail hides in the mean).
+- **Postmortem = blameless**, systemic causes, owned + tracked action items.
+
+## Incidents (say: "mitigate first, root-cause later")
+- First 10 min: acknowledge → confirm real → scope impact → check **recent change** → golden signals + trace → roll back if deploy correlated → communicate.
+- **Mitigate** = stop the bleeding (rollback/failover/scale/kill-switch). **Resolve** = fix root cause later.
+- **5 Whys** to reach the deepest actionable cause. Escalate early — it's not failure.
+
+## Kubernetes
+- **Control plane vs data plane are decoupled.** Control plane down → running apps KEEP serving (kubelet + kube-proxy local). BREAKS: kubectl, scheduling, self-healing across nodes, scaling, endpoint updates.
+- **etcd** = cluster brain/state; back it up (`etcdctl snapshot save`); loss = catastrophic. HA = 3/5 nodes, quorum.
+- **Liveness** = alive? fail→restart. **Readiness** = ready for traffic? fail→remove from Service. **Startup** = for slow boots.
+- **CrashLoopBackOff:** `describe` (events+exit code) + `logs --previous`. Causes: bad config/secret, missing dep, failed migration, aggressive liveness probe.
+- **OOMKilled = exit 137:** confirm → stabilize (scale/raise limit) → decide under-provisioned (right-size) vs leak (heap dump/profile) → prevent (limits, saturation alerts, soak test).
+- **ImagePullBackOff:** wrong tag / missing imagePullSecret / registry auth.
+- **Pending:** insufficient resources / affinity-taint mismatch / unbound PVC.
+- **Requests** = guaranteed (scheduling). **Limits** = ceiling (CPU→throttle, mem→OOMKill).
+- **Zero-downtime rollback:** `kubectl rollout undo` → rolling revert; new(old-ver) pods pass readiness before bad ones removed; need multiple replicas + PDB + backward-compatible (expand-contract) schema.
+- **Intermittent 500s under load** → CPU throttling from low limits / pool exhaustion / OOM → trace + saturation.
+
+## Memory vs Storage
+- **Memory (RAM):** volatile, fast, temporary, small — the "desk". OOM crashes processes.
+- **Storage (disk):** persistent, slower, permanent, large — the "filing cabinet". Full disk → node DiskPressure/eviction.
+
+## CI/CD
+- **Flow:** commit → PR (reviews+checks) → CI (build, test, Sonar, SAST/SCA/secret/Trivy, build+push SHA-tagged image) → merge → deploy same immutable image dev→qa→staging → approval gate → prod (canary/blue-green) → verify SLIs → auto-rollback.
+- **Build once, promote the same artifact** (never rebuild between envs).
+- **Blue-green:** two envs, flip LB, instant rollback, double infra.
+- **Canary:** small % traffic → grow or auto-rollback on metrics; smallest blast radius.
+- **Rolling** (K8s default): gradual, maxSurge/maxUnavailable, no extra infra.
+- **DB changes:** Flyway/Liquibase + **expand-contract** so app rolls back independently.
+- **GitHub Actions:** encrypted secrets, **environments** w/ required reviewers, **OIDC** for short-lived cloud creds (no stored keys), self-hosted runners inside network for finance.
+- **Jenkins/CloudBees** = heavy enterprise governance; **Actions** = native, low-maintenance.
+
+## Observability tools
+- **Dynatrace:** OneAgent (auto-instrument), PurePath (traces), Smartscape (topology), Davis AI (auto RCA), SLOs.
+- **Splunk:** logs + SPL (`index=... | stats/timechart`); security/audit.
+- **Prometheus** (pull, PromQL, Alertmanager) + **Grafana** (dashboards, many sources); **Loki** = logs.
+- **Metrics** = trends/alerts; **Logs** = detail; **Traces** = where in the request. **OpenTelemetry** = vendor-neutral standard.
+- **Green dashboards, slow users** → measuring wrong thing: use RUM/synthetic + p99 + slice by dimension.
+
+## Dynatrace dashboard (end-to-end — memorize)
+OneAgent reporting → scope with **Management Zone** → Create Dashboard → tiles: **failure rate, p90/p99 latency, throughput, errors** filtered to endpoint → add **SLO + error-budget tile** → custom tiles via **metric selector / DQL** → wire **alerts** (Davis + custom) → **share** w/ access control.
+
+## Cloud / networking
+- **Same VPC, 2 subnets:** already route (local route) — just open **security groups/NSGs/NACLs**.
+- **Different VPCs:** **VPC peering** (Azure: VNet peering) → private IPs. Rules: **non-overlapping CIDRs**, **NOT transitive**, update route tables + SGs both sides. Scale → **Transit Gateway / hub-spoke**.
+- **On-prem:** VPN / Direct Connect / ExpressRoute. Expose one service privately → **PrivateLink**.
+- **RTO** = max downtime; **RPO** = max data loss. **Shared responsibility:** provider secures cloud, you secure in-cloud (data, IAM, config).
+
+## Terraform
+- **Workflow:** init → plan (preview) → apply → destroy. Plan = safety gate.
+- **State** = map config↔real resources; **remote backend + locking** mandatory (S3+DynamoDB / TF Cloud); can hold secrets → encrypt.
+- **for_each > count** for changing lists (stable keys). **Drift** = real ≠ state; `plan` detects.
+- **import** adopts existing resources; **moved** blocks refactor without destroy; **prevent_destroy** guards prod.
+
+## Python (must-have)
+- Read big files: iterate the file object (lazy). API: `requests` w/ timeout + `raise_for_status`.
+- Shell out: `subprocess.run([...], capture_output=True, text=True, timeout=..)` — list args (no injection).
+- Decorator = wrap fn to add behavior (retry/log/timing). Generator (`yield`) = lazy/memory-efficient.
+- Idempotent = safe to re-run (check-before-act). `== ` value vs `is` identity (use `is None`).
+- **`#` reverse:** keep `#` fixed, reverse the rest → `abhinand#an`→`nadnanih#ba`, `krish#na`→`anhsi#rk`. Two-pointer = O(1) space (LeetCode 917).
+
+## Behavioral / EPAM
+- Tell-me-about-yourself: SRE 4y — CI/CD, K8s, cloud, Dynatrace/Splunk, SLO/error budgets, Python automation, on-call, blameless RCA.
+- Conflict w/ dev: lead with **data + error-budget policy**, offer middle path (canary + monitoring), partner not police.
+- Learning: hands-on labs, release notes, SRE books, certs. Be honest on depth ("used fundamentals, deepening it").
+- Reporting to mgmt: outcomes + business impact — SLO attainment, incidents/trends, DORA, budget, vuln status; plain language.
+- **Finance framing everywhere:** availability SLAs, auditability, change control, segregation of duties, data integrity, low RTO/RPO, encryption.
+
+## Interview process reflexes
+1. **Clarify before answering** ("same VPC or different?", "running or new pods?").
+2. **Principle first, commands second.**
+3. **Coding:** think aloud → verify vs example → state complexity → edge cases.
+4. **Always have 2-3 questions to ask back** (on-call/blameless culture, SLO maturity, tooling, toil vs project balance).
+
+---
+**commit → PR with branch protection → CI builds and scans, tagging the image by commit SHA → push to registry → promote that same immutable image through dev/qa/staging → approval gate (change control + audit for finance) → prod via canary/blue-green → observe SLIs, auto-rollback if unhealthy.**
+
+<img width="1472" height="1440" alt="image" src="https://github.com/user-attachments/assets/5335597e-bcbc-46a2-a30b-5c145dab8999" />
+
+
+---
 # EPAM SRE / DevOps Interview Prep — 250 Q&A
 ### Financial-domain client · ~4 YOE · Python (must) · PowerShell (nice) · SRE, CI/CD, K8s, Cloud, Observability (Dynatrace/Splunk/Grafana/Prometheus)
 
